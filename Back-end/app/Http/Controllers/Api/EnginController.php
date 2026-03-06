@@ -25,7 +25,7 @@ class EnginController extends Controller
             $query->where('statut', $request->statut);
         }
 
-        return response()->json($query->orderBy('type')->orderBy('code')->get());
+        return response()->json(['data' => $query->orderBy('type')->orderBy('code')->get()]);
     }
 
     /**

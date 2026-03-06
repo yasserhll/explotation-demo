@@ -14,43 +14,73 @@ use Carbon\Carbon;
 class DashboardController extends Controller
 {
     /**
+     * Retourne le dernier mois qui a des données de production.
+     * Si le mois courant a des données → on l'utilise.
+     * Sinon on remonte jusqu'à trouver un mois avec données (max 12 mois).
+     */
+    private function getActiveMonth(): string
+    {
+        // Mois courant d'abord
+        $current = now()->format('Y-m');
+        $count = Production::whereRaw("strftime('%Y-%m', date) = ?", [$current])->count();
+        if ($count > 0) return $current;
+
+        // Sinon chercher le dernier mois avec données
+        $last = Production::selectRaw("strftime('%Y-%m', date) as month")
+            ->groupBy('month')
+            ->orderByDesc('month')
+            ->first();
+
+        return $last ? $last->month : $current;
+    }
+
+    /**
      * KPIs et données du tableau de bord principal.
      * GET /api/dashboard
      */
     public function index(Request $request): JsonResponse
     {
-        $today     = now()->toDateString();
-        $monthStart = now()->startOfMonth()->toDateString();
+        $activeMonth = $this->getActiveMonth();
+        $today = now()->toDateString();
 
-        // Productions du mois
-        $monthlyProds = Production::whereRaw("strftime('%Y-%m', date) = ?", [now()->format('Y-m')])->get();
+        // Productions du mois actif
+        $monthlyProds = Production::whereRaw("strftime('%Y-%m', date) = ?", [$activeMonth])->get();
 
-        // Productions aujourd'hui
+        // Productions aujourd'hui (peut être vide si pas de données récentes)
         $todayProds = Production::whereDate('date', $today)->get();
 
-        // Phosphate vs Stérile ce mois
+        // Phosphate vs Stérile
         $phosphateMois = $monthlyProds->where('type_materiau', 'PHOSPHATE');
         $sterileMois   = $monthlyProds->filter(fn($p) => str_starts_with($p->type_materiau, 'STERILE'));
 
-        // Trend 15 derniers jours
-        $trend = Production::where('date', '>=', now()->subDays(14)->toDateString())
-            ->orderBy('date')
-            ->get()
-            ->groupBy(fn($p) => $p->date->format('Y-m-d'))
-            ->map(function ($items, $date) {
-                $phos = $items->where('type_materiau', 'PHOSPHATE');
-                $ster = $items->filter(fn($p) => str_starts_with($p->type_materiau, 'STERILE'));
-                return [
-                    'date'             => $date,
-                    'total_voyages'    => $items->sum('total_voyage'),
-                    'total_volume'     => $items->sum('volume_m3'),
-                    'volume_phosphate' => $phos->sum('volume_m3'),
-                    'volume_sterile'   => $ster->sum('volume_m3'),
-                    'nb_engins'        => $items->pluck('pelle_1er')->merge($items->pluck('pelle_2e'))->filter()->unique()->count(),
-                ];
-            })->values();
+        // Trend 15 derniers jours du mois actif
+        // On prend les 15 derniers jours disponibles dans ce mois
+        $lastDateInMonth = Production::whereRaw("strftime('%Y-%m', date) = ?", [$activeMonth])
+            ->max('date');
 
-        // Top destinations du mois
+        $trend = collect();
+        if ($lastDateInMonth) {
+            $lastDate = Carbon::parse($lastDateInMonth);
+            $startDate = $lastDate->copy()->subDays(14)->toDateString();
+
+            $trend = Production::whereBetween('date', [$startDate, $lastDateInMonth])
+                ->orderBy('date')
+                ->get()
+                ->groupBy(fn($p) => $p->date->format('Y-m-d'))
+                ->map(function ($items, $date) {
+                    $phos = $items->where('type_materiau', 'PHOSPHATE');
+                    $ster = $items->filter(fn($p) => str_starts_with($p->type_materiau, 'STERILE'));
+                    return [
+                        'date'             => $date,
+                        'total_voyages'    => $items->sum('total_voyage'),
+                        'total_volume'     => $items->sum('volume_m3'),
+                        'volume_phosphate' => $phos->sum('volume_m3'),
+                        'volume_sterile'   => $ster->sum('volume_m3'),
+                    ];
+                })->values();
+        }
+
+        // Top destinations du mois actif
         $topDestinations = $monthlyProds->groupBy('destination')
             ->map(fn($items, $dest) => [
                 'destination'   => $dest,
@@ -61,35 +91,34 @@ class DashboardController extends Controller
             ->take(8)
             ->values();
 
-        // Performance par tranchée (mois en cours)
+        // Performance par tranchée
         $byTranchee = $monthlyProds->whereNotNull('tranchee')
             ->groupBy('tranchee')
             ->map(fn($items, $tr) => [
-                'tranchee'       => $tr,
-                'total_voyages'  => $items->sum('total_voyage'),
-                'total_volume'   => $items->sum('volume_m3'),
-                'type_materiau'  => $items->first()->type_materiau,
-                'nb_jours'       => $items->pluck('date')->map(fn($d) => $d->format('Y-m-d'))->unique()->count(),
-                'volume_par_jour'=> $items->pluck('date')->map(fn($d) => $d->format('Y-m-d'))->unique()->count() > 0
-                    ? round($items->sum('volume_m3') / $items->pluck('date')->map(fn($d) => $d->format('Y-m-d'))->unique()->count(), 0)
-                    : 0,
+                'tranchee'      => $tr,
+                'total_voyages' => $items->sum('total_voyage'),
+                'total_volume'  => $items->sum('volume_m3'),
+                'type_materiau' => $items->first()->type_materiau,
             ])
             ->sortByDesc('total_volume')
             ->values();
 
-        // Arrêts du mois - taux disponibilité global
+        // Taux disponibilité global
         $engins = Engin::all();
-        $joursTotal = now()->day; // jours écoulés dans le mois
+        $joursTotal = max(1, Carbon::parse($activeMonth . '-01')->daysInMonth);
         $heuresTheoriques = $joursTotal * 20 * max(1, $engins->count());
-        $totalArrets = Arret::where('date', '>=', $monthStart)->sum('duree_heures');
+        $monthStart = $activeMonth . '-01';
+        $monthEnd   = Carbon::parse($activeMonth . '-01')->endOfMonth()->toDateString();
+        $totalArrets = Arret::whereBetween('date', [$monthStart, $monthEnd])->sum('duree_heures');
         $tauxDispo = $heuresTheoriques > 0
             ? round((($heuresTheoriques - $totalArrets) / $heuresTheoriques) * 100, 1)
             : 100;
 
-        // Camions actifs (affectations)
+        // Camions actifs
         $nbCamions = Affectation::whereNull('date')->where('statut', 'actif')->count();
 
         return response()->json([
+            'active_month' => $activeMonth, // utile pour debug
             'kpis' => [
                 'volume_phosphate_mois'  => round($phosphateMois->sum('volume_m3'), 0),
                 'voyages_phosphate_mois' => $phosphateMois->sum('total_voyage'),
@@ -97,16 +126,16 @@ class DashboardController extends Controller
                 'voyages_sterile_mois'   => $sterileMois->sum('total_voyage'),
                 'total_volume_mois'      => round($monthlyProds->sum('volume_m3'), 0),
                 'total_voyages_mois'     => $monthlyProds->sum('total_voyage'),
-                'jours_production'       => $monthlyProds->pluck('date')->map(fn($d) => $d->format('Y-m-d'))->unique()->count(),
+                'jours_production'       => $monthlyProds->pluck('date')
+                    ->map(fn($d) => $d->format('Y-m-d'))->unique()->count(),
                 'taux_disponibilite'     => $tauxDispo,
-                'nb_camions_actifs'      => $nbCamions ?: 23,
-                // Aujourd'hui
+                'nb_camions_actifs'      => $nbCamions ?: 26,
                 'volume_today'           => round($todayProds->sum('volume_m3'), 0),
                 'voyages_today'          => $todayProds->sum('total_voyage'),
             ],
-            'trend_15j'       => $trend,
+            'trend_15j'        => $trend,
             'top_destinations' => $topDestinations,
-            'by_tranchee'     => $byTranchee,
+            'by_tranchee'      => $byTranchee,
         ]);
     }
 
@@ -116,153 +145,117 @@ class DashboardController extends Controller
      */
     public function optimisations(Request $request): JsonResponse
     {
-        $month  = $request->get('month', now()->format('Y-m'));
+        // Utilise le mois actif si aucun mois passé
+        $month = $request->get('month', $this->getActiveMonth());
         $suggestions = [];
 
         $productions = Production::whereRaw("strftime('%Y-%m', date) = ?", [$month])->get();
 
         if ($productions->isEmpty()) {
-            return response()->json(['suggestions' => [], 'message' => 'Aucune donnée pour ce mois']);
+            return response()->json([
+                'suggestions' => [],
+                'message'     => "Aucune donnée pour $month",
+                'month'       => $month,
+            ]);
         }
 
-        // 1. Analyser les routes peu efficaces (volume/voyage < seuil)
+        // 1. Routes peu efficaces
         $parRoute = $productions->groupBy(fn($p) => $p->tranchee . '|' . $p->destination);
         foreach ($parRoute as $key => $items) {
-            if ($items->sum('total_voyage') < 5) continue; // ignore si peu de voyages
+            if ($items->sum('total_voyage') < 5) continue;
             [$tr, $dest] = explode('|', $key);
-            $avgVolPerVoyage = $items->sum('total_voyage') > 0
-                ? $items->sum('volume_m3') / $items->sum('total_voyage')
-                : 0;
-            if ($avgVolPerVoyage < 14 && $avgVolPerVoyage > 0) {
+            $avgVol = $items->sum('total_voyage') > 0
+                ? $items->sum('volume_m3') / $items->sum('total_voyage') : 0;
+            if ($avgVol < 14 && $avgVol > 0) {
                 $suggestions[] = [
-                    'type'      => 'efficacite',
-                    'priorite'  => 'haute',
-                    'titre'     => "Faible rendement : {$tr} → {$dest}",
-                    'detail'    => sprintf(
-                        "Volume moyen par voyage : %.1f m³ (seuil recommandé ≥ 14 m³). Total : %d voyages, %.0f m³.",
-                        $avgVolPerVoyage,
-                        $items->sum('total_voyage'),
-                        $items->sum('volume_m3')
-                    ),
-                    'action'    => "Vérifier le chargement des camions sur cette route ou réaffecter les engins.",
+                    'priorite' => 'haute',
+                    'titre'    => "Faible rendement : {$tr} → {$dest}",
+                    'detail'   => sprintf("Volume moyen : %.1f m³/voyage (seuil ≥ 14 m³). %d voyages au total.", $avgVol, $items->sum('total_voyage')),
+                    'action'   => "Vérifier le chargement des camions ou réaffecter les engins.",
                 ];
             }
         }
 
-        // 2. Jours de faible production phosphate
+        // 2. Jours de faible production
         $byDate = $productions->where('type_materiau', 'PHOSPHATE')
             ->groupBy(fn($p) => $p->date->format('Y-m-d'));
         $joursBasProd = $byDate->filter(fn($items) => $items->sum('volume_m3') < 3000);
         if ($joursBasProd->count() > 2) {
             $suggestions[] = [
-                'type'     => 'production',
                 'priorite' => 'haute',
-                'titre'    => "{$joursBasProd->count()} jours avec production phosphate < 3000 m³",
-                'detail'   => 'Jours concernés : ' . $joursBasProd->keys()->implode(', '),
-                'action'   => "Analyser les causes : arrêts engins, météo, manque de main-d'œuvre.",
+                'titre'    => "{$joursBasProd->count()} jours avec phosphate < 3 000 m³",
+                'detail'   => 'Jours : ' . $joursBasProd->keys()->implode(', '),
+                'action'   => "Analyser les causes : arrêts engins, météo, main-d'œuvre.",
             ];
         }
 
-        // 3. Tranchée la plus performante - à privilégier
+        // 3. Meilleure tranchée
         $byTranchee = $productions->where('type_materiau', 'PHOSPHATE')
             ->whereNotNull('tranchee')
             ->groupBy('tranchee')
-            ->map(fn($items, $tr) => [
-                'tranchee'       => $tr,
-                'volume'         => $items->sum('volume_m3'),
-                'voyage_avg'     => $items->sum('total_voyage') > 0 ? $items->sum('volume_m3') / $items->sum('total_voyage') : 0,
+            ->map(fn($items) => [
+                'tranchee'   => $items->first()->tranchee,
+                'volume'     => $items->sum('volume_m3'),
+                'voyage_avg' => $items->sum('total_voyage') > 0
+                    ? round($items->sum('volume_m3') / $items->sum('total_voyage'), 1) : 0,
             ])
             ->sortByDesc('volume');
 
         if ($byTranchee->isNotEmpty()) {
             $best = $byTranchee->first();
             $suggestions[] = [
-                'type'     => 'optimisation',
                 'priorite' => 'info',
                 'titre'    => "Tranchée la plus productive : {$best['tranchee']}",
-                'detail'   => sprintf(
-                    "Volume total : %.0f m³ | Rendement moyen : %.1f m³/voyage.",
-                    $best['volume'],
-                    $best['voyage_avg']
-                ),
+                'detail'   => sprintf("Volume : %s m³ | Rendement : %.1f m³/voyage.", number_format($best['volume'], 0, ',', ' '), $best['voyage_avg']),
                 'action'   => "Prioriser l'affectation des engins sur cette tranchée.",
             ];
         }
 
-        // 4. Ratio phosphate / stérile
+        // 4. Ratio phosphate/stérile
         $volPhos = $productions->where('type_materiau', 'PHOSPHATE')->sum('volume_m3');
         $volSter = $productions->filter(fn($p) => str_starts_with($p->type_materiau, 'STERILE'))->sum('volume_m3');
         if ($volPhos > 0 && $volSter > 0) {
-            $ratio = $volSter / $volPhos;
+            $ratio = round($volSter / $volPhos, 2);
             if ($ratio > 0.6) {
                 $suggestions[] = [
-                    'type'     => 'ratio',
                     'priorite' => 'moyenne',
-                    'titre'    => sprintf("Ratio stérile/phosphate élevé : %.2f", $ratio),
-                    'detail'   => sprintf(
-                        "Volume phosphate : %.0f m³ | Volume stérile : %.0f m³. Le volume stérile dépasse 60%% du phosphate.",
-                        $volPhos,
-                        $volSter
-                    ),
-                    'action'   => "Revoir le plan d'abattage pour optimiser l'accès aux couches phosphatées.",
+                    'titre'    => "Ratio stérile/phosphate élevé : {$ratio}",
+                    'detail'   => sprintf("Phosphate : %s m³ | Stérile : %s m³.", number_format($volPhos, 0, ',', ' '), number_format($volSter, 0, ',', ' ')),
+                    'action'   => "Revoir le plan d'abattage pour accéder aux couches phosphatées.",
                 ];
             }
         }
 
-        // 5. Arrêts récurrents par type
+        // 5. Arrêts récurrents
         $arretsMois = Arret::whereRaw("strftime('%Y-%m', date) = ?", [$month])->get();
         if ($arretsMois->isNotEmpty()) {
-            $arretParType = $arretsMois->groupBy('type_arret')
-                ->map(fn($items, $type) => [
-                    'type'          => $type,
-                    'nb_incidents'  => $items->count(),
-                    'total_heures'  => $items->sum('duree_heures'),
-                ])
-                ->sortByDesc('total_heures');
-
-            $worstArret = $arretParType->first();
-            if ($worstArret && $worstArret['total_heures'] > 10) {
-                $labels = [
-                    'panne_mecanique'        => 'Pannes mécaniques',
-                    'maintenance_preventive' => 'Maintenance préventive',
-                    'pluie'                  => 'Arrêts pluie',
-                    'accident'               => 'Accidents',
-                    'manque_carburant'       => 'Manque carburant',
-                    'absence_chauffeur'      => 'Absence chauffeur',
-                    'autre'                  => 'Autres arrêts',
-                ];
-                $label = $labels[$worstArret['type']] ?? $worstArret['type'];
+            $worst = $arretsMois->groupBy('type_arret')
+                ->map(fn($items) => ['type' => $items->first()->type_arret, 'heures' => $items->sum('duree_heures'), 'nb' => $items->count()])
+                ->sortByDesc('heures')->first();
+            if ($worst && $worst['heures'] > 10) {
                 $suggestions[] = [
-                    'type'     => 'disponibilite',
                     'priorite' => 'haute',
-                    'titre'    => "Cause principale d'arrêt : {$label}",
-                    'detail'   => sprintf(
-                        "%d incidents — %.1f heures perdues ce mois.",
-                        $worstArret['nb_incidents'],
-                        $worstArret['total_heures']
-                    ),
-                    'action'   => "Mettre en place un plan d'action pour réduire ce type d'arrêt.",
+                    'titre'    => "Cause principale d'arrêt : {$worst['type']}",
+                    'detail'   => "{$worst['nb']} incidents — {$worst['heures']} heures perdues.",
+                    'action'   => "Mettre en place un plan d'action correctif.",
                 ];
             }
         } else {
-            // Pas encore d'arrêts enregistrés
             $suggestions[] = [
-                'type'     => 'disponibilite',
                 'priorite' => 'info',
-                'titre'    => 'Aucun arrêt enregistré ce mois',
-                'detail'   => 'Commencez à enregistrer les arrêts pour obtenir le taux de disponibilité réel.',
-                'action'   => 'Accédez au module Disponibilité pour saisir les arrêts.',
+                'titre'    => 'Aucun arrêt enregistré',
+                'detail'   => 'Enregistrez les arrêts pour calculer le taux de disponibilité réel.',
+                'action'   => 'Accédez au module Disponibilité.',
             ];
         }
 
-        // Trier par priorité
         $ordre = ['haute' => 0, 'moyenne' => 1, 'info' => 2];
         usort($suggestions, fn($a, $b) => ($ordre[$a['priorite']] ?? 3) <=> ($ordre[$b['priorite']] ?? 3));
 
         return response()->json([
-            'month'       => $month,
-            'nb_suggestions' => count($suggestions),
-            'suggestions' => $suggestions,
+            'month'           => $month,
+            'nb_suggestions'  => count($suggestions),
+            'suggestions'     => $suggestions,
         ]);
     }
 
@@ -275,39 +268,27 @@ class DashboardController extends Controller
         $from = $request->get('from', now()->startOfWeek()->toDateString());
         $to   = $request->get('to', now()->endOfWeek()->toDateString());
 
-        $productions = Production::whereBetween('date', [$from, $to])
-            ->orderBy('date')
-            ->get();
+        $productions = Production::whereBetween('date', [$from, $to])->orderBy('date')->get();
+        $phos = $productions->where('type_materiau', 'PHOSPHATE');
+        $ster = $productions->filter(fn($p) => str_starts_with($p->type_materiau, 'STERILE'));
 
-        $phosphates = $productions->where('type_materiau', 'PHOSPHATE');
-        $steriles   = $productions->filter(fn($p) => str_starts_with($p->type_materiau, 'STERILE'));
-
-        // Par jour
         $byDate = $productions->groupBy(fn($p) => $p->date->format('Y-m-d'))
-            ->map(function ($items, $date) {
-                $phos = $items->where('type_materiau', 'PHOSPHATE');
-                $ster = $items->filter(fn($p) => str_starts_with($p->type_materiau, 'STERILE'));
-                return [
-                    'date'             => $date,
-                    'voyages_phosphate' => $phos->sum('total_voyage'),
-                    'volume_phosphate'  => round($phos->sum('volume_m3'), 0),
-                    'voyages_sterile'   => $ster->sum('total_voyage'),
-                    'volume_sterile'    => round($ster->sum('volume_m3'), 0),
-                    'total_voyages'     => $items->sum('total_voyage'),
-                    'total_volume'      => round($items->sum('volume_m3'), 0),
-                ];
-            })->values();
+            ->map(fn($items, $date) => [
+                'date'             => $date,
+                'volume_phosphate' => round($items->where('type_materiau', 'PHOSPHATE')->sum('volume_m3'), 0),
+                'volume_sterile'   => round($items->filter(fn($p) => str_starts_with($p->type_materiau, 'STERILE'))->sum('volume_m3'), 0),
+                'total_volume'     => round($items->sum('volume_m3'), 0),
+                'total_voyages'    => $items->sum('total_voyage'),
+            ])->values();
 
         return response()->json([
-            'periode'            => ['from' => $from, 'to' => $to],
-            'voyages_phosphate'  => $phosphates->sum('total_voyage'),
-            'volume_phosphate'   => round($phosphates->sum('volume_m3'), 0),
-            'voyages_sterile'    => $steriles->sum('total_voyage'),
-            'volume_sterile'     => round($steriles->sum('volume_m3'), 0),
-            'total_voyages'      => $productions->sum('total_voyage'),
-            'total_volume'       => round($productions->sum('volume_m3'), 0),
-            'nb_jours'           => $byDate->count(),
-            'by_date'            => $byDate,
+            'periode'          => ['from' => $from, 'to' => $to],
+            'volume_phosphate' => round($phos->sum('volume_m3'), 0),
+            'volume_sterile'   => round($ster->sum('volume_m3'), 0),
+            'total_volume'     => round($productions->sum('volume_m3'), 0),
+            'total_voyages'    => $productions->sum('total_voyage'),
+            'nb_jours'         => $byDate->count(),
+            'by_date'          => $byDate,
         ]);
     }
 }

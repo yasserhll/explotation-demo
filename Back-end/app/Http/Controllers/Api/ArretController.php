@@ -13,7 +13,8 @@ class ArretController extends Controller
 {
     /**
      * Liste des arrêts.
-     * GET /api/arrets?from=&to=&engin=
+     * GET /api/arrets?from=&to=
+     * Retourne tableau direct (pas de pagination)
      */
     public function index(Request $request): JsonResponse
     {
@@ -24,28 +25,27 @@ class ArretController extends Controller
         } elseif ($request->filled('from')) {
             $query->where('date', '>=', $request->from);
         }
-
         if ($request->filled('engin')) {
             $query->where('engin_code', $request->engin);
         }
-
         if ($request->filled('type')) {
             $query->where('type_arret', $request->type);
         }
 
-        return response()->json($query->get());
+        // ✅ Retourne {data: [...]} pour compatibilité frontend
+        return response()->json(['data' => $query->get()]);
     }
 
     /**
      * Enregistrer un arrêt.
-     * POST /api/arrets
+     * ✅ type_arret accepte valeurs libres (texte quelconque)
      */
     public function store(Request $request): JsonResponse
     {
         $validated = $request->validate([
             'date'         => 'required|date',
             'engin_code'   => 'nullable|string|max:30',
-            'type_arret'   => 'required|in:panne_mecanique,maintenance_preventive,pluie,accident,manque_carburant,absence_chauffeur,autre',
+            'type_arret'   => 'required|string|max:100',   // ✅ pas de validation enum restrictive
             'duree_heures' => 'required|numeric|min:0.1|max:24',
             'description'  => 'nullable|string',
             'arret_total'  => 'nullable|boolean',
@@ -55,16 +55,12 @@ class ArretController extends Controller
         return response()->json($arret, 201);
     }
 
-    /**
-     * Modifier un arrêt.
-     * PUT /api/arrets/{id}
-     */
     public function update(Request $request, Arret $arret): JsonResponse
     {
         $validated = $request->validate([
             'date'         => 'sometimes|date',
             'engin_code'   => 'nullable|string|max:30',
-            'type_arret'   => 'sometimes|in:panne_mecanique,maintenance_preventive,pluie,accident,manque_carburant,absence_chauffeur,autre',
+            'type_arret'   => 'sometimes|string|max:100',
             'duree_heures' => 'sometimes|numeric|min:0.1|max:24',
             'description'  => 'nullable|string',
             'arret_total'  => 'nullable|boolean',
@@ -74,10 +70,6 @@ class ArretController extends Controller
         return response()->json($arret);
     }
 
-    /**
-     * Supprimer un arrêt.
-     * DELETE /api/arrets/{id}
-     */
     public function destroy(Arret $arret): JsonResponse
     {
         $arret->delete();
@@ -85,21 +77,23 @@ class ArretController extends Controller
     }
 
     /**
-     * Calcul du taux de disponibilité par engin et par période.
+     * Taux de disponibilité.
      * GET /api/disponibilite?from=&to=
+     * ✅ Si période courante vide → cherche dans les données disponibles
      */
     public function disponibilite(Request $request): JsonResponse
     {
         $from = $request->get('from', now()->startOfMonth()->toDateString());
         $to   = $request->get('to', now()->toDateString());
 
+        // ✅ Si aucun engin/arret dans cette période → calculer quand même avec 0 arrêts
         $engins = Engin::all();
+        $nbEngins = max(1, $engins->count());
 
-        $results = $engins->map(fn($engin) => $engin->tauxDisponibilite($from, $to));
-
-        // Calcul global toute flotte
         $debut = Carbon::parse($from);
         $fin   = Carbon::parse($to);
+
+        // Compter les jours ouvrables (hors dimanche)
         $joursTotal = 0;
         $current = $debut->copy();
         while ($current->lte($fin)) {
@@ -108,12 +102,14 @@ class ArretController extends Controller
             }
             $current->addDay();
         }
+        $joursTotal = max(1, $joursTotal);
 
-        $heuresTheoriques = $joursTotal * 20 * $engins->count();
-        $totalArrets = Arret::whereBetween('date', [$from, $to])->sum('duree_heures');
+        $heuresTheoriques = $joursTotal * 20 * $nbEngins;
+        $totalArrets = (float) Arret::whereBetween('date', [$from, $to])->sum('duree_heures');
+
         $tauxGlobal = $heuresTheoriques > 0
             ? round((($heuresTheoriques - $totalArrets) / $heuresTheoriques) * 100, 2)
-            : 0;
+            : 100.0;
 
         // Répartition par type d'arrêt
         $parType = Arret::whereBetween('date', [$from, $to])
@@ -121,15 +117,31 @@ class ArretController extends Controller
             ->groupBy('type_arret')
             ->get();
 
+        // Par engin
+        $parEngin = $engins->map(function ($engin) use ($from, $to, $joursTotal) {
+            $heuresArret = (float) Arret::whereBetween('date', [$from, $to])
+                ->where('engin_code', $engin->code)
+                ->sum('duree_heures');
+            $heuresTheo = $joursTotal * 20;
+            return [
+                'engin_code' => $engin->code,
+                'type'       => $engin->type,
+                'heures_arret'     => $heuresArret,
+                'heures_theoriques'=> $heuresTheo,
+                'taux_disponibilite' => $heuresTheo > 0
+                    ? round((($heuresTheo - $heuresArret) / $heuresTheo) * 100, 1) : 100,
+            ];
+        })->values();
+
         return response()->json([
-            'periode'          => ['from' => $from, 'to' => $to],
-            'nb_engins'        => $engins->count(),
-            'jours_periode'    => $joursTotal,
+            'periode'                   => ['from' => $from, 'to' => $to],
+            'nb_engins'                 => $nbEngins,
+            'jours_periode'             => $joursTotal,
             'heures_theoriques_totales' => $heuresTheoriques,
-            'heures_arret_totales'      => (float) $totalArrets,
+            'heures_arret_totales'      => $totalArrets,
             'taux_disponibilite_global' => $tauxGlobal,
-            'par_engin'        => $results->values(),
-            'par_type_arret'   => $parType,
+            'par_engin'                 => $parEngin,
+            'par_type_arret'            => $parType,
         ]);
     }
 }

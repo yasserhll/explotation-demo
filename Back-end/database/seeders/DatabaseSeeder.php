@@ -8,21 +8,19 @@ class DatabaseSeeder extends Seeder
 {
     public function run(): void
     {
+        $this->command->info('');
+        $this->command->info('🚛 Seeding BenGuerir Mining Database...');
+        $this->command->info('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+
         $this->call([
             EnginSeeder::class,
             AffectationSeeder::class,
             ProductionSeeder::class,
         ]);
 
-        $this->command->info('✅ Base de données BenGuerir initialisée avec succès !');
-        $this->command->table(
-            ['Table', 'Enregistrements'],
-            [
-                ['engins',      \App\Models\Engin::count()],
-                ['affectations', \App\Models\Affectation::count()],
-                ['productions', \App\Models\Production::count()],
-                ['arrets',      \App\Models\Arret::count()],
-            ]
-        );
+        $this->command->info('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+        $this->command->info('✅ Base de données prête avec données réelles!');
+        $this->command->info('   Source: Excel Jan-Fév 2026 — Site BenGuerir');
+        $this->command->info('');
     }
 }

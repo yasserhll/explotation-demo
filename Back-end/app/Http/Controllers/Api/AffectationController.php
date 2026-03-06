@@ -28,7 +28,7 @@ class AffectationController extends Controller
             $query->where('statut', $request->statut);
         }
 
-        return response()->json($query->get());
+        return response()->json(['data' => $query->get()]);
     }
 
     /**

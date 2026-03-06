@@ -1,117 +1,119 @@
 import { useState, useEffect } from 'react';
 import { affectationAPI } from '../services/api';
 
+const STATUS_CONFIG = {
+  actif:       { bg: '#F0FDF4', border: '#BBF7D0', text: '#166534', dot: '#22C55E', label: 'Actif' },
+  en_panne:    { bg: '#FFF1F2', border: '#FECDD3', text: '#BE123C', dot: '#EF4444', label: 'En panne' },
+  arret:       { bg: '#F8FAFC', border: '#E2E8F0', text: '#475569', dot: '#94A3B8', label: 'Arrêt' },
+  maintenance: { bg: '#FFFBEB', border: '#FDE68A', text: '#B45309', dot: '#F59E0B', label: 'Maintenance' },
+  disponible:  { bg: '#F0FDF4', border: '#BBF7D0', text: '#166534', dot: '#22C55E', label: 'Disponible' },
+};
+
+function StatusBadge({ statut }) {
+  const cfg = STATUS_CONFIG[statut] || STATUS_CONFIG.arret;
+  return (
+    <span className="flex items-center gap-1.5 text-xs font-semibold px-2.5 py-1 rounded-full" style={{ background: cfg.bg, border: `1px solid ${cfg.border}`, color: cfg.text }}>
+      <span className="w-1.5 h-1.5 rounded-full" style={{ background: cfg.dot }}/>
+      {cfg.label}
+    </span>
+  );
+}
+
 export default function Affectations() {
   const [affectations, setAffectations] = useState([]);
   const [engins, setEngins] = useState([]);
   const [loading, setLoading] = useState(true);
-  const [date, setDate] = useState(new Date().toISOString().slice(0, 10));
   const [editRow, setEditRow] = useState(null);
   const [saving, setSaving] = useState(false);
   const [msg, setMsg] = useState(null);
 
   const load = () => {
     setLoading(true);
-    Promise.all([
-      affectationAPI.getAll(date),
-      affectationAPI.getEngins()
-    ]).then(([a, e]) => {
-      setAffectations(a.data.data || []);
-      setEngins(e.data.data || []);
-      setLoading(false);
-    }).catch(() => setLoading(false));
+    Promise.all([affectationAPI.getAll(null), affectationAPI.getEngins()])
+      .then(([a, e]) => { setAffectations(a.data.data || []); setEngins(e.data.data || []); setLoading(false); })
+      .catch(() => setLoading(false));
   };
+  useEffect(() => { load(); }, []);
 
-  useEffect(() => { load(); }, [date]);
-
-  const handleSaveRow = async (row) => {
+  const handleSaveRow = async row => {
     setSaving(true);
     try {
-      if (row.id) {
-        await affectationAPI.update(row.id, row);
-      } else {
-        await affectationAPI.create({ ...row, date });
-      }
-      setEditRow(null);
-      setMsg({ type: 'success', text: 'Affectation sauvegardée ✓' });
-      load();
-    } catch (err) {
-      setMsg({ type: 'error', text: 'Erreur lors de la sauvegarde' });
-    }
-    setSaving(false);
-    setTimeout(() => setMsg(null), 3000);
+      row.id ? await affectationAPI.update(row.id, row) : await affectationAPI.create({ ...row, date: null });
+      setEditRow(null); setMsg({ ok: true, text: 'Affectation sauvegardée ✓' }); load();
+    } catch { setMsg({ ok: false, text: 'Erreur lors de la sauvegarde' }); }
+    setSaving(false); setTimeout(() => setMsg(null), 3000);
   };
 
-  const handleDelete = async (id) => {
-    if (!confirm('Supprimer ?')) return;
-    await affectationAPI.delete(id);
-    load();
-  };
+  const handleDelete = async id => { if (!confirm('Supprimer ?')) return; await affectationAPI.delete(id); load(); };
+  const handleEnginStatus = async (engin, status) => { await affectationAPI.updateEngin(engin.id, { statut: status }); load(); };
 
-  const handleEnginStatus = async (engin, status) => {
-    await affectationAPI.updateEngin(engin.id, { statut: status });
-    load();
-  };
+  // Stats
+  const actifs = affectations.filter(a => a.statut === 'actif').length;
+  const pannes = affectations.filter(a => a.statut === 'en_panne').length;
+  const arrets = affectations.filter(a => a.statut === 'arret').length;
 
-  const addNewRow = () => {
-    setEditRow({ id: null, conducteur_1: '', numero_camion: '', conducteur_2: '', statut: 'actif' });
-  };
+  const inputCls = "w-full bg-gray-50 border border-gray-200 rounded-lg px-3 py-2 text-sm";
 
   return (
-    <div className="space-y-6">
+    <div className="space-y-5 max-w-7xl mx-auto">
       {msg && (
-        <div className={`p-3 rounded-lg text-sm font-medium ${msg.type === 'success' ? 'bg-green-100 text-green-800' : 'bg-red-100 text-red-800'}`}>
+        <div className={`rounded-xl px-4 py-3 text-sm font-medium fade-up flex items-center gap-2 ${msg.ok ? 'bg-emerald-50 border border-emerald-200 text-emerald-800' : 'bg-red-50 border border-red-200 text-red-800'}`}>
           {msg.text}
         </div>
       )}
 
-      {/* Date selector */}
-      <div className="bg-white rounded-xl p-4 shadow-sm border border-gray-100 flex items-center justify-between">
-        <div className="flex items-center gap-4">
-          <div>
-            <label className="text-xs text-gray-500 block mb-1">Date d'affectation</label>
-            <input type="date" value={date} onChange={e => setDate(e.target.value)}
-              className="border border-gray-200 rounded-lg px-3 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-blue-300" />
-          </div>
-          <div className="text-sm text-gray-500">{affectations.length} camions affectés</div>
+      {/* Header bar */}
+      <div className="bg-white rounded-2xl p-4 border border-gray-100/80 flex items-center justify-between" style={{ boxShadow: '0 1px 8px rgba(0,0,0,0.05)' }}>
+        <div className="flex gap-5">
+          {[
+            { val: actifs, label: 'En service', color: '#166534' },
+            { val: pannes, label: 'En panne', color: '#BE123C' },
+            { val: arrets, label: 'En arrêt', color: '#64748B' },
+            { val: affectations.length, label: 'Total véhicules', color: '#004B8D' },
+          ].map((s, i) => (
+            <div key={i} className="text-center px-3">
+              <div className="text-2xl font-bold stat-num" style={{ color: s.color }}>{s.val}</div>
+              <div className="text-xs text-gray-400">{s.label}</div>
+            </div>
+          ))}
         </div>
-        <button onClick={addNewRow}
-          className="bg-blue-600 text-white px-4 py-2 rounded-lg text-sm font-medium hover:bg-blue-700">
-          + Ajouter
+        <button onClick={() => setEditRow({ id: null, chauffeur_principal: '', camion_code: '', chauffeur_secondaire: '', type_vehicule: 'CAMION', statut: 'actif' })}
+          className="flex items-center gap-2 px-4 py-2 rounded-xl text-sm font-semibold text-white transition-all hover:opacity-90"
+          style={{ background: 'linear-gradient(135deg, #004B8D, #0066CC)' }}>
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" className="w-4 h-4"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+          Ajouter
         </button>
       </div>
 
-      {/* Edit modal */}
+      {/* Modal */}
       {editRow !== null && (
-        <div className="fixed inset-0 bg-black/40 flex items-center justify-center z-50 p-4">
+        <div className="fixed inset-0 bg-black/50 backdrop-blur-sm flex items-center justify-center z-50 p-4">
           <div className="bg-white rounded-2xl shadow-2xl w-full max-w-md">
             <div className="p-5 border-b border-gray-100 flex items-center justify-between">
-              <h2 className="font-bold text-gray-800">{editRow.id ? 'Modifier' : 'Nouvelle Affectation'}</h2>
-              <button onClick={() => setEditRow(null)} className="text-gray-400">✕</button>
+              <h2 className="font-bold text-gray-900">{editRow.id ? 'Modifier' : 'Nouvelle Affectation'}</h2>
+              <button onClick={() => setEditRow(null)} className="w-8 h-8 flex items-center justify-center rounded-lg bg-gray-100 text-gray-500 text-sm">✕</button>
             </div>
             <div className="p-5 space-y-4">
+              {[
+                { label: 'N° Camion', key: 'camion_code', placeholder: 'Ex: D183' },
+                { label: 'Conducteur 1ère équipe', key: 'chauffeur_principal', placeholder: 'Nom du conducteur' },
+                { label: 'Conducteur 2ème équipe', key: 'chauffeur_secondaire', placeholder: 'Nom du conducteur' },
+              ].map(f => (
+                <div key={f.key}>
+                  <label className="text-xs font-semibold text-gray-500 uppercase tracking-wide block mb-1.5">{f.label}</label>
+                  <input value={editRow[f.key] || ''} onChange={e => setEditRow({ ...editRow, [f.key]: e.target.value })} placeholder={f.placeholder} className={inputCls}/>
+                </div>
+              ))}
               <div>
-                <label className="text-xs text-gray-500 block mb-1">N° Camion</label>
-                <input value={editRow.numero_camion} onChange={e => setEditRow({ ...editRow, numero_camion: e.target.value })}
-                  placeholder="Ex: D183"
-                  className="w-full border border-gray-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-300" />
+                <label className="text-xs font-semibold text-gray-500 uppercase tracking-wide block mb-1.5">Type Véhicule</label>
+                <select value={editRow.type_vehicule} onChange={e => setEditRow({ ...editRow, type_vehicule: e.target.value })} className={inputCls}>
+                  <option value="CAMION">Camion</option>
+                  <option value="TOMBEREAU">Tombereau</option>
+                </select>
               </div>
               <div>
-                <label className="text-xs text-gray-500 block mb-1">Conducteur 1ère équipe</label>
-                <input value={editRow.conducteur_1} onChange={e => setEditRow({ ...editRow, conducteur_1: e.target.value })}
-                  placeholder="Nom conducteur"
-                  className="w-full border border-gray-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-300" />
-              </div>
-              <div>
-                <label className="text-xs text-gray-500 block mb-1">Conducteur 2ème équipe</label>
-                <input value={editRow.conducteur_2} onChange={e => setEditRow({ ...editRow, conducteur_2: e.target.value })}
-                  placeholder="Nom conducteur"
-                  className="w-full border border-gray-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-300" />
-              </div>
-              <div>
-                <label className="text-xs text-gray-500 block mb-1">Statut</label>
-                <select value={editRow.statut} onChange={e => setEditRow({ ...editRow, statut: e.target.value })}
-                  className="w-full border border-gray-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-300">
+                <label className="text-xs font-semibold text-gray-500 uppercase tracking-wide block mb-1.5">Statut</label>
+                <select value={editRow.statut} onChange={e => setEditRow({ ...editRow, statut: e.target.value })} className={inputCls}>
                   <option value="actif">Actif</option>
                   <option value="en_panne">En panne</option>
                   <option value="arret">Arrêt</option>
@@ -119,61 +121,48 @@ export default function Affectations() {
               </div>
             </div>
             <div className="p-5 border-t border-gray-100 flex gap-3 justify-end">
-              <button onClick={() => setEditRow(null)} className="px-4 py-2 text-sm text-gray-600 border border-gray-200 rounded-lg">Annuler</button>
-              <button onClick={() => handleSaveRow(editRow)} disabled={saving}
-                className="px-5 py-2 text-sm font-medium text-white bg-blue-600 rounded-lg hover:bg-blue-700 disabled:opacity-50">
-                {saving ? '...' : 'Sauvegarder'}
+              <button onClick={() => setEditRow(null)} className="px-4 py-2 text-sm font-medium text-gray-600 bg-gray-100 rounded-xl hover:bg-gray-200">Annuler</button>
+              <button onClick={() => handleSaveRow(editRow)} disabled={saving} className="px-5 py-2 text-sm font-semibold text-white rounded-xl disabled:opacity-50" style={{ background: 'linear-gradient(135deg, #004B8D, #0066CC)' }}>
+                {saving ? 'Sauvegarde...' : 'Sauvegarder'}
               </button>
             </div>
           </div>
         </div>
       )}
 
-      <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-        {/* Camions */}
-        <div className="bg-white rounded-xl shadow-sm border border-gray-100">
+      <div className="grid grid-cols-1 xl:grid-cols-3 gap-5">
+        {/* Camions table */}
+        <div className="xl:col-span-2 bg-white rounded-2xl border border-gray-100/80 overflow-hidden" style={{ boxShadow: '0 1px 8px rgba(0,0,0,0.05)' }}>
           <div className="px-5 py-4 border-b border-gray-100">
-            <h3 className="font-semibold text-gray-700">🚛 Affectation Camions</h3>
+            <h3 className="font-semibold text-gray-800">Flotte de Camions</h3>
+            <p className="text-xs text-gray-400 mt-0.5">Affectations permanentes — {affectations.length} véhicules</p>
           </div>
-          <div className="overflow-auto max-h-96">
-            {loading ? (
-              <div className="text-center py-8 text-gray-400">Chargement...</div>
-            ) : (
-              <table className="w-full text-sm">
-                <thead>
-                  <tr className="bg-gray-50">
-                    <th className="text-left py-2 px-4 text-gray-500 font-medium">Camion</th>
-                    <th className="text-left py-2 px-4 text-gray-500 font-medium">Conducteur 1</th>
-                    <th className="text-left py-2 px-4 text-gray-500 font-medium">Conducteur 2</th>
-                    <th className="text-left py-2 px-4 text-gray-500 font-medium">Statut</th>
-                    <th className="py-2 px-4"></th>
-                  </tr>
-                </thead>
+          <div className="overflow-auto" style={{ maxHeight: '480px' }}>
+            {loading ? <div className="text-center py-10 text-gray-400 text-sm">Chargement...</div> : (
+              <table className="w-full">
+                <thead><tr style={{ background: '#F8FAFC' }}>
+                  {['Camion','Conducteur 1','Conducteur 2','Type','Statut',''].map(h => <th key={h} className="text-left py-2.5 px-4 text-xs font-bold text-gray-500 uppercase">{h}</th>)}
+                </tr></thead>
                 <tbody>
                   {affectations.map(aff => (
-                    <tr key={aff.id} className="border-t border-gray-50 hover:bg-gray-50">
-                      <td className="py-2.5 px-4 font-bold text-blue-700">{aff.numero_camion}</td>
-                      <td className="py-2.5 px-4 text-gray-700">{aff.conducteur_1 || '-'}</td>
-                      <td className="py-2.5 px-4 text-gray-500 text-xs">{aff.conducteur_2 || '-'}</td>
+                    <tr key={aff.id} className="border-t border-gray-50 table-row-hover">
+                      <td className="py-2.5 px-4 text-sm font-bold text-blue-700 stat-num">{aff.camion_code}</td>
+                      <td className="py-2.5 px-4 text-sm text-gray-700">{aff.chauffeur_principal || '—'}</td>
+                      <td className="py-2.5 px-4 text-xs text-gray-500">{aff.chauffeur_secondaire || '—'}</td>
+                      <td className="py-2.5 px-4 text-xs text-gray-500">{aff.type_vehicule || 'CAMION'}</td>
+                      <td className="py-2.5 px-4"><StatusBadge statut={aff.statut}/></td>
                       <td className="py-2.5 px-4">
-                        <span className={`px-2 py-0.5 rounded-full text-xs font-medium
-                          ${aff.statut === 'actif' ? 'bg-green-100 text-green-700' 
-                          : aff.statut === 'en_panne' ? 'bg-red-100 text-red-700'
-                          : 'bg-gray-100 text-gray-600'}`}>
-                          {aff.statut}
-                        </span>
-                      </td>
-                      <td className="py-2.5 px-4">
-                        <div className="flex gap-2">
-                          <button onClick={() => setEditRow(aff)} className="text-blue-400 hover:text-blue-600 text-xs">✏️</button>
-                          <button onClick={() => handleDelete(aff.id)} className="text-red-400 hover:text-red-600 text-xs">🗑️</button>
+                        <div className="flex gap-1.5">
+                          <button onClick={() => setEditRow({ ...aff })} className="w-7 h-7 flex items-center justify-center rounded-lg bg-blue-50 text-blue-600 hover:bg-blue-100">
+                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className="w-3.5 h-3.5"><path d="M11 4H4a2 2 0 00-2 2v14a2 2 0 002 2h14a2 2 0 002-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 013 3L12 15l-4 1 1-4 9.5-9.5z"/></svg>
+                          </button>
+                          <button onClick={() => handleDelete(aff.id)} className="w-7 h-7 flex items-center justify-center rounded-lg bg-red-50 text-red-500 hover:bg-red-100">
+                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className="w-3.5 h-3.5"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14H6L5 6"/></svg>
+                          </button>
                         </div>
                       </td>
                     </tr>
                   ))}
-                  {affectations.length === 0 && (
-                    <tr><td colSpan={5} className="text-center py-6 text-gray-400">Aucune affectation pour cette date</td></tr>
-                  )}
                 </tbody>
               </table>
             )}
@@ -181,30 +170,34 @@ export default function Affectations() {
         </div>
 
         {/* Engins */}
-        <div className="bg-white rounded-xl shadow-sm border border-gray-100">
+        <div className="bg-white rounded-2xl border border-gray-100/80 overflow-hidden" style={{ boxShadow: '0 1px 8px rgba(0,0,0,0.05)' }}>
           <div className="px-5 py-4 border-b border-gray-100">
-            <h3 className="font-semibold text-gray-700">🏗️ Engins de Chantier</h3>
+            <h3 className="font-semibold text-gray-800">Engins de Chantier</h3>
+            <p className="text-xs text-gray-400 mt-0.5">Pelles & niveleuses</p>
           </div>
-          <div className="p-4 space-y-3">
+          <div className="p-4 space-y-3 overflow-auto" style={{ maxHeight: '480px' }}>
             {engins.map(engin => (
-              <div key={engin.id} className="flex items-center justify-between p-3 bg-gray-50 rounded-lg">
-                <div>
-                  <div className="font-bold text-gray-800">{engin.code}</div>
-                  <div className="text-xs text-gray-500">{engin.conducteur_1}{engin.conducteur_2 ? ' / ' + engin.conducteur_2 : ''}</div>
-                </div>
-                <div className="flex items-center gap-2">
-                  <select
-                    value={engin.statut}
-                    onChange={e => handleEnginStatus(engin, e.target.value)}
-                    className={`text-xs border rounded-full px-2 py-1 font-medium
-                      ${engin.statut === 'disponible' ? 'bg-green-100 border-green-200 text-green-700'
-                      : engin.statut === 'en_panne' ? 'bg-red-100 border-red-200 text-red-700'
-                      : 'bg-gray-100 border-gray-200 text-gray-600'}`}
-                  >
-                    <option value="disponible">✓ Disponible</option>
-                    <option value="en_panne">✗ En panne</option>
+              <div key={engin.id} className="p-3 rounded-xl" style={{ background: '#F8FAFC', border: '1px solid #F1F5F9' }}>
+                <div className="flex items-start justify-between mb-2">
+                  <div>
+                    <div className="font-bold text-sm text-gray-800">{engin.code}</div>
+                    <div className="text-xs text-gray-400">{engin.type} • {engin.modele}</div>
+                  </div>
+                  <select value={engin.statut || 'actif'} onChange={e => handleEnginStatus(engin, e.target.value)}
+                    className="text-xs border rounded-lg px-2 py-1 font-semibold cursor-pointer"
+                    style={{ background: (STATUS_CONFIG[engin.statut] || STATUS_CONFIG.actif).bg, color: (STATUS_CONFIG[engin.statut] || STATUS_CONFIG.actif).text, borderColor: (STATUS_CONFIG[engin.statut] || STATUS_CONFIG.actif).border }}>
+                    <option value="actif">✓ Actif</option>
+                    <option value="en_panne">✕ En panne</option>
                     <option value="maintenance">🔧 Maintenance</option>
                   </select>
+                </div>
+                <div className="flex flex-col gap-0.5">
+                  {[engin.chauffeur_principal, engin.chauffeur_secondaire].filter(Boolean).map((c, i) => (
+                    <div key={i} className="flex items-center gap-1.5 text-xs text-gray-500">
+                      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className="w-3 h-3 text-gray-300"><path d="M20 21v-2a4 4 0 00-4-4H8a4 4 0 00-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>
+                      {c}
+                    </div>
+                  ))}
                 </div>
               </div>
             ))}
