@@ -1,12 +1,263 @@
-import { useState } from 'react';
+import { useState, useEffect, useRef } from 'react';
+import { rotationAPI, dashboardAPI } from './services/api';
 import Dashboard from './pages/Dashboard';
-import Production from './pages/Production';
+import RotationChauffeurs from './pages/RotationChauffeurs';
 import Affectations from './pages/Affectations';
 import Disponibilite from './pages/Disponibilite';
 import Rapports from './pages/Rapports';
 import Optimisations from './pages/Optimisations';
 
-const PAGES = { dashboard: Dashboard, production: Production, affectations: Affectations, disponibilite: Disponibilite, rapports: Rapports, optimisations: Optimisations };
+
+
+
+// ─── System Status Badge ──────────────────────────────────────────────────────
+function SystemStatus() {
+  const [status, setStatus] = useState('checking'); // checking | ok | error | warn
+  const [latency, setLatency] = useState(null);
+  const [detail, setDetail] = useState('');
+
+  const check = async () => {
+    setStatus('checking');
+    const t0 = Date.now();
+    try {
+      await dashboardAPI.get();
+      const ms = Date.now() - t0;
+      setLatency(ms);
+      if (ms < 800)       { setStatus('ok');   setDetail(`Backend OK · ${ms}ms`); }
+      else if (ms < 2000) { setStatus('warn');  setDetail(`Lent · ${ms}ms`); }
+      else                { setStatus('warn');  setDetail(`Très lent · ${ms}ms`); }
+    } catch(e) {
+      setLatency(null);
+      if (!e.response) {
+        setStatus('error'); setDetail('Backend inaccessible');
+      } else if (e.response.status >= 500) {
+        setStatus('error'); setDetail(`Erreur serveur ${e.response.status}`);
+      } else {
+        setStatus('warn');  setDetail(`HTTP ${e.response.status}`);
+      }
+    }
+  };
+
+  // Vérif au démarrage puis toutes les 30s
+  useEffect(() => {
+    check();
+    const id = setInterval(check, 30000);
+    return () => clearInterval(id);
+  }, []);
+
+  const cfg = {
+    checking: { dot:'#94A3B8', bg:'#F8FAFC', border:'#E2E8F0', text:'#64748B', label:'Vérification…', anim:true  },
+    ok:       { dot:'#10B981', bg:'#F0FDF4', border:'#A7F3D0', text:'#065F46', label:'Système actif',  anim:true  },
+    warn:     { dot:'#F59E0B', bg:'#FFFBEB', border:'#FDE68A', text:'#92400E', label:'Attention',      anim:false },
+    error:    { dot:'#EF4444', bg:'#FEF2F2', border:'#FECACA', text:'#991B1B', label:'Hors ligne',     anim:false },
+  }[status];
+
+  return (
+    <button onClick={check} title={detail || 'Cliquer pour vérifier'} style={{
+      display:'flex', alignItems:'center', gap:'6px',
+      padding:'5px 12px', borderRadius:'20px', border:`1px solid ${cfg.border}`,
+      background:cfg.bg, cursor:'pointer', transition:'all 0.2s',
+    }}>
+      <span style={{
+        width:'8px', height:'8px', borderRadius:'50%', flexShrink:0,
+        background: cfg.dot,
+        boxShadow: status==='ok' ? `0 0 6px ${cfg.dot}` : status==='error' ? `0 0 6px ${cfg.dot}` : 'none',
+        animation: cfg.anim ? 'pulse 2s infinite' : 'none',
+      }}/>
+      <span style={{ fontSize:'12px', fontWeight:600, color:cfg.text, whiteSpace:'nowrap' }}>
+        {cfg.label}
+      </span>
+      {latency && status==='ok' && (
+        <span style={{ fontSize:'10px', color:'#6EE7B7', fontFamily:'monospace' }}>{latency}ms</span>
+      )}
+    </button>
+  );
+}
+
+// ─── Notification Bell ────────────────────────────────────────────────────────
+function NotificationBell({ onNavigate }) {
+  const [open,   setOpen]   = useState(false);
+  const [notifs, setNotifs] = useState([]);
+  const [loading, setLoad]  = useState(false);
+  const ref = useRef(null);
+
+  // Fermer en cliquant dehors
+  useEffect(() => {
+    const handler = (e) => { if (ref.current && !ref.current.contains(e.target)) setOpen(false); };
+    document.addEventListener('mousedown', handler);
+    return () => document.removeEventListener('mousedown', handler);
+  }, []);
+
+  // Charger les notifs depuis les optimisations + rotations du jour
+  const load = async () => {
+    setLoad(true);
+    const items = [];
+    try {
+      // 1. Suggestions d'optimisation (critiques/attention)
+      const opt = await dashboardAPI.getOptimisations();
+      (opt.data.suggestions || []).forEach(s => {
+        if (s.priorite === 'haute' || s.priorite === 'moyenne') {
+          items.push({
+            id: 'opt_' + items.length,
+            type: s.priorite === 'haute' ? 'critique' : 'attention',
+            icon: s.priorite === 'haute' ? '🔴' : '⚠️',
+            title: s.titre,
+            detail: s.detail,
+            action: () => { onNavigate('optimisations'); setOpen(false); },
+            actionLabel: 'Voir optimisations',
+          });
+        }
+      });
+
+      // 2. Vérifier si la rotation du jour est saisie
+      const today = (() => {
+        const n = new Date();
+        return `${n.getFullYear()}-${String(n.getMonth()+1).padStart(2,'0')}-${String(n.getDate()).padStart(2,'0')}`;
+      })();
+      const rot = await rotationAPI.getByDate(today);
+      const nbCamions = (rot.data.rotations || []).length;
+      if (nbCamions === 0) {
+        items.push({
+          id: 'rot_today',
+          type: 'info',
+          icon: '📋',
+          title: 'Rotation du jour non saisie',
+          detail: "Aucune rotation enregistrée pour aujourd'hui.",
+          action: () => { onNavigate('rotation'); setOpen(false); },
+          actionLabel: 'Saisir la rotation',
+        });
+      } else {
+        // Vérifier camions sans voyages
+        const sansVoyages = (rot.data.rotations || []).filter(r =>
+          !( (r.phosphate_p1a_vgs||0)+(r.phosphate_p1b_vgs||0)+
+             (r.phosphate_p2a_vgs||0)+(r.phosphate_p2b_vgs||0)+
+             (r.sterile_p1a_vgs||0)+(r.sterile_p1b_vgs||0)+
+             (r.sterile_p2a_vgs||0)+(r.sterile_p2b_vgs||0) )
+        ).map(r => r.camion_id);
+        if (sansVoyages.length > 0) {
+          items.push({
+            id: 'rot_vgs',
+            type: 'attention',
+            icon: '⚠️',
+            title: `${sansVoyages.length} camion(s) sans voyages`,
+            detail: `Données manquantes : ${sansVoyages.slice(0,5).join(', ')}${sansVoyages.length>5?'…':''}`,
+            action: () => { onNavigate('rotation'); setOpen(false); },
+            actionLabel: 'Compléter',
+          });
+        } else {
+          items.push({
+            id: 'rot_ok',
+            type: 'ok',
+            icon: '✅',
+            title: `${nbCamions} camion(s) saisis aujourd'hui`,
+            detail: 'Rotation du jour complète.',
+            action: () => { onNavigate('rotation'); setOpen(false); },
+            actionLabel: 'Voir rotation',
+          });
+        }
+      }
+    } catch(e) { /* silencieux */ }
+    setNotifs(items);
+    setLoad(false);
+  };
+
+  const toggle = () => {
+    if (!open) load();
+    setOpen(v => !v);
+  };
+
+  const nb = notifs.filter(n => n.type === 'critique' || n.type === 'attention').length;
+  const colors = {
+    critique:  { bg:'#FFF1F2', border:'#FECDD3', badge:'#BE123C', text:'#BE123C' },
+    attention: { bg:'#FFFBEB', border:'#FDE68A', badge:'#B45309', text:'#B45309' },
+    info:      { bg:'#EFF6FF', border:'#BFDBFE', badge:'#1D4ED8', text:'#1D4ED8' },
+    ok:        { bg:'#F0FDF4', border:'#BBF7D0', badge:'#166534', text:'#166534' },
+  };
+
+  return (
+    <div ref={ref} style={{ position:'relative' }}>
+      <button onClick={toggle} style={{
+        position:'relative', width:'36px', height:'36px', borderRadius:'10px',
+        background:'#F9FAFB', border:'1px solid #E5E7EB',
+        display:'flex', alignItems:'center', justifyContent:'center',
+        cursor:'pointer', color:'#6B7280',
+        boxShadow: open ? '0 0 0 3px rgba(0,75,141,0.15)' : 'none',
+      }}>
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" width="18" height="18">
+          <path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9"/>
+          <path d="M13.73 21a2 2 0 0 1-3.46 0"/>
+        </svg>
+        {nb > 0 && (
+          <span style={{
+            position:'absolute', top:'-4px', right:'-4px',
+            minWidth:'18px', height:'18px', borderRadius:'9px',
+            background:'#EF4444', color:'white',
+            fontSize:'10px', fontWeight:700, lineHeight:'18px', textAlign:'center',
+            border:'2px solid white', padding:'0 3px',
+          }}>{nb}</span>
+        )}
+      </button>
+
+      {open && (
+        <div style={{
+          position:'absolute', top:'44px', right:0, zIndex:200,
+          background:'white', borderRadius:'16px', width:'340px',
+          boxShadow:'0 8px 40px rgba(0,0,0,0.18)', border:'1px solid #F1F5F9',
+          overflow:'hidden',
+        }}>
+          {/* Header */}
+          <div style={{ padding:'14px 16px', borderBottom:'1px solid #F9FAFB', display:'flex', alignItems:'center', justifyContent:'space-between' }}>
+            <div style={{ fontWeight:700, fontSize:'14px', color:'#111827' }}>Notifications</div>
+            {nb > 0 && <span style={{ fontSize:'11px', fontWeight:600, color:'#EF4444', background:'#FEF2F2', padding:'2px 8px', borderRadius:'20px', border:'1px solid #FECACA' }}>{nb} alerte{nb>1?'s':''}</span>}
+          </div>
+
+          {/* Liste */}
+          <div style={{ maxHeight:'380px', overflowY:'auto' }}>
+            {loading ? (
+              <div style={{ padding:'30px', textAlign:'center', color:'#9CA3AF', fontSize:'13px' }}>
+                <div style={{ width:'20px', height:'20px', border:'2px solid #3B82F6', borderTopColor:'transparent', borderRadius:'50%', animation:'spin 0.8s linear infinite', margin:'0 auto 8px' }}/>
+                Analyse en cours…
+              </div>
+            ) : notifs.length === 0 ? (
+              <div style={{ padding:'30px', textAlign:'center', color:'#9CA3AF', fontSize:'13px' }}>
+                <div style={{ fontSize:'32px', marginBottom:'8px' }}>✅</div>
+                Aucune alerte
+              </div>
+            ) : (
+              notifs.map(n => {
+                const c = colors[n.type] || colors.info;
+                return (
+                  <div key={n.id} style={{ padding:'12px 16px', borderBottom:'1px solid #F9FAFB', background:c.bg }}>
+                    <div style={{ display:'flex', gap:'10px', alignItems:'flex-start' }}>
+                      <span style={{ fontSize:'18px', lineHeight:1, marginTop:'1px' }}>{n.icon}</span>
+                      <div style={{ flex:1, minWidth:0 }}>
+                        <div style={{ fontWeight:700, fontSize:'13px', color:'#111827', marginBottom:'2px' }}>{n.title}</div>
+                        <div style={{ fontSize:'11px', color:'#6B7280', lineHeight:'1.4', marginBottom:'6px' }}>{n.detail}</div>
+                        <button onClick={n.action} style={{
+                          fontSize:'11px', fontWeight:700, color:c.text,
+                          background:'white', border:`1px solid ${c.border}`,
+                          padding:'4px 10px', borderRadius:'7px', cursor:'pointer',
+                        }}>{n.actionLabel} →</button>
+                      </div>
+                    </div>
+                  </div>
+                );
+              })
+            )}
+          </div>
+
+          {/* Footer */}
+          <div style={{ padding:'10px 16px', borderTop:'1px solid #F9FAFB', display:'flex', justifyContent:'space-between', alignItems:'center' }}>
+            <button onClick={load} style={{ fontSize:'12px', color:'#6B7280', background:'none', border:'none', cursor:'pointer', fontWeight:500 }}>↻ Actualiser</button>
+            <button onClick={() => { onNavigate('optimisations'); setOpen(false); }} style={{ fontSize:'12px', fontWeight:700, color:'#004B8D', background:'#EFF6FF', border:'1px solid #BFDBFE', padding:'5px 12px', borderRadius:'8px', cursor:'pointer' }}>Voir toutes →</button>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+const PAGES = { dashboard: Dashboard, rotation: RotationChauffeurs, affectations: Affectations, disponibilite: Disponibilite, rapports: Rapports, optimisations: Optimisations };
 
 // SVG Icons - Professional mining icons
 const Icons = {
@@ -68,12 +319,12 @@ const Icons = {
 };
 
 const NAV = [
-  { id: 'dashboard',    label: 'Tableau de Bord',  Icon: Icons.Dashboard },
-  { id: 'production',   label: 'Saisie Production', Icon: Icons.Production },
-  { id: 'affectations', label: 'Affectations',      Icon: Icons.Truck },
-  { id: 'disponibilite',label: 'Disponibilité',     Icon: Icons.Gauge },
-  { id: 'rapports',     label: 'Rapports',          Icon: Icons.Report },
-  { id: 'optimisations',label: 'Optimisations',     Icon: Icons.Target },
+  { id: 'dashboard',    label: 'Tableau de Bord',     Icon: Icons.Dashboard },
+  { id: 'rotation',     label: 'Rotation Chauffeurs',  Icon: Icons.Production },
+  { id: 'affectations', label: 'Affectations',         Icon: Icons.Truck },
+  { id: 'disponibilite',label: 'Disponibilité',        Icon: Icons.Gauge },
+  { id: 'rapports',     label: 'Rapports',             Icon: Icons.Report },
+  { id: 'optimisations',label: 'Optimisations',        Icon: Icons.Target },
 ];
 
 // OCP Mining Logo SVG
@@ -204,15 +455,9 @@ export default function App() {
 
           <div className="flex items-center gap-3">
             {/* Status badge */}
-            <div className="flex items-center gap-1.5 text-xs font-medium text-emerald-700 bg-emerald-50 border border-emerald-200 rounded-full px-3 py-1.5">
-              <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse"/>
-              Système actif
-            </div>
+            <SystemStatus/>
             {/* Bell */}
-            <button className="relative w-9 h-9 rounded-lg bg-gray-50 border border-gray-200 flex items-center justify-center text-gray-500 hover:bg-gray-100 transition-colors">
-              <Icons.Bell />
-              <span className="absolute top-1.5 right-1.5 w-2 h-2 rounded-full bg-red-500 border-2 border-white"/>
-            </button>
+            <NotificationBell onNavigate={setPage}/>
             {/* Avatar */}
             <div className="w-9 h-9 rounded-lg flex items-center justify-center text-white text-xs font-bold" style={{ background: 'linear-gradient(135deg, #004B8D, #00843D)' }}>
               BG

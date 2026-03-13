@@ -44,4 +44,13 @@ export const dashboardAPI = {
   getOptimisations: () => api.get('/optimisations'),
 };
 
+export const rotationAPI = {
+  getByDate:  (date)      => api.get('/rotations', { params: { date } }),
+  getDates:   ()          => api.get('/rotations/dates'),
+  getMonthly: (month)     => api.get('/rotations/monthly', { params: { month } }),
+  create:     (data)      => api.post('/rotations', data),
+  update:     (id, data)  => api.put(`/rotations/${id}`, data),
+  delete:     (id)        => api.delete(`/rotations/${id}`),
+};
+
 export default api;

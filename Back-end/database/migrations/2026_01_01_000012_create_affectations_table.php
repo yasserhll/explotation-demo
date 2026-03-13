@@ -11,7 +11,7 @@ return new class extends Migration
         Schema::create('affectations', function (Blueprint $table) {
             $table->id();
             $table->date('date')->nullable(); // null = affectation permanente
-            $table->string('chauffeur_principal');
+            $table->string('chauffeur_principal')->nullable();
             $table->string('camion_code');   // D183, D184, etc.
             $table->string('chauffeur_secondaire')->nullable();
             $table->enum('type_vehicule', ['camion', 'tombereau', 'autre'])->default('camion');

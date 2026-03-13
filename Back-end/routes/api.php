@@ -6,6 +6,7 @@ use App\Http\Controllers\Api\EnginController;
 use App\Http\Controllers\Api\AffectationController;
 use App\Http\Controllers\Api\ArretController;
 use App\Http\Controllers\Api\DashboardController;
+use App\Http\Controllers\Api\RotationController;
 
 /*
 |--------------------------------------------------------------------------
@@ -34,3 +35,8 @@ Route::apiResource('affectations', AffectationController::class);
 // Arrêts & Disponibilité
 Route::get('/disponibilite', [ArretController::class, 'disponibilite']);
 Route::apiResource('arrets', ArretController::class);
+
+// Rotations Chauffeurs (journalier + mensuel)
+Route::get('/rotations/dates',   [RotationController::class, 'dates']);
+Route::get('/rotations/monthly', [RotationController::class, 'monthly']);
+Route::apiResource('rotations', RotationController::class);
