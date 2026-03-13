@@ -3,8 +3,18 @@ import { arretAPI, affectationAPI } from '../services/api';
 import { PieChart, Pie, Cell, Tooltip, ResponsiveContainer } from 'recharts';
 
 const TYPES_ARRET = [
-  'Panne mécanique','Panne électrique','Météo (pluie)','Manque carburant',
-  'Entretien préventif','Arrêt direction','Attente engin','Crevé','Visite technique','Autre'
+  'Panne mécanique',
+  'Panne électrique',
+  'Météo (pluie)',
+  'Manque carburant',
+  'Entretien préventif',
+  'Arrêt direction',
+  'Attente engin',
+  'Crevé',
+  'Visite technique',
+  'Accident',
+  'Absence chauffeur',
+  'Autre',
 ];
 const COLORS = ['#EF4444','#F97316','#EAB308','#8B5CF6','#06B6D4','#10B981','#6366F1','#84CC16','#F43F5E','#A3E635'];
 const inputCls = "w-full bg-gray-50 border border-gray-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-blue-400 focus:ring-2 focus:ring-blue-100";
@@ -66,8 +76,11 @@ export default function Disponibilite() {
   const [showForm, setShowForm]   = useState(false);
   const [form, setForm]           = useState({
     date: today.toISOString().slice(0,10),
-    type_arret:'', description:'', duree_heures:'', engin_code:''
+    type_arret:'', description:'', duree_heures:'',
   });
+  // Multi-machine selection
+  const [selectedMachines, setSelectedMachines] = useState([]);
+  const [machineFilter, setMachineFilter] = useState('');
   const [saving, setSaving] = useState(false);
   const [filterType, setFilterType] = useState('all'); // all | camion | engin
 
@@ -133,12 +146,46 @@ export default function Disponibilite() {
   };
 
   // When engin_code is selected in form, we can show its drivers
-  const selectedMachine = allMachines.find(m => m.code === form.engin_code);
+  const selectedMachine = selectedMachines.length === 1
+    ? allMachines.find(m => m.code === selectedMachines[0])
+    : null;
+
+  // Toggle one machine
+  const toggleMachine = (code) => {
+    setSelectedMachines(prev =>
+      prev.includes(code) ? prev.filter(c => c !== code) : [...prev, code]
+    );
+  };
+  // Select/deselect all visible (filtered) machines
+  const toggleAll = (machines) => {
+    const codes = machines.map(m => m.code);
+    const allSelected = codes.every(c => selectedMachines.includes(c));
+    if (allSelected) {
+      setSelectedMachines(prev => prev.filter(c => !codes.includes(c)));
+    } else {
+      setSelectedMachines(prev => [...new Set([...prev, ...codes])]);
+    }
+  };
 
   const handleSubmit = async e => {
-    e.preventDefault(); setSaving(true);
-    try { await arretAPI.create(form); setShowForm(false); load(); }
-    catch(err) { alert('Erreur: ' + (err.response?.data?.message || err.message)); }
+    e.preventDefault();
+    if (selectedMachines.length === 0) {
+      alert('Sélectionnez au moins une machine.');
+      return;
+    }
+    setSaving(true);
+    try {
+      // Créer un arrêt pour chaque machine sélectionnée
+      await Promise.all(
+        selectedMachines.map(code =>
+          arretAPI.create({ ...form, engin_code: code })
+        )
+      );
+      setShowForm(false);
+      load();
+    } catch(err) {
+      alert('Erreur: ' + (err.response?.data?.message || err.message));
+    }
     setSaving(false);
   };
 
@@ -146,8 +193,9 @@ export default function Disponibilite() {
     setForm({
       date: today.toISOString().slice(0,10),
       type_arret:'', description:'', duree_heures:'',
-      engin_code: machine?.code || ''
     });
+    setSelectedMachines(machine ? [machine.code] : []);
+    setMachineFilter('');
     setShowForm(true);
   };
 
@@ -388,86 +436,212 @@ export default function Disponibilite() {
         )}
       </div>
 
-      {/* Modal Arret */}
-      {showForm && (
-        <div className="fixed inset-0 bg-black/60 backdrop-blur-sm flex items-center justify-center z-50 p-4">
-          <div className="bg-white rounded-2xl shadow-2xl w-full max-w-md">
-            <div className="p-5 border-b border-gray-100 flex items-center justify-between">
-              <div>
-                <h2 className="font-bold text-gray-900">Enregistrer un Arrêt</h2>
-                {selectedMachine && (
-                  <p className="text-xs text-blue-600 mt-0.5 font-medium">
-                    Machine : {selectedMachine.code} — <TypeBadge type={selectedMachine.type}/>
+      {/* Modal Arret — multi-machine */}
+      {showForm && (() => {
+        // Machines filtrées par la recherche dans le modal
+        const camionsList = allMachines.filter(m => m.type==='CAMION'||m.type==='TOMBEREAU');
+        const enginsList  = allMachines.filter(m => m.type!=='CAMION'&&m.type!=='TOMBEREAU');
+        const filterFn = m => !machineFilter || m.code.toLowerCase().includes(machineFilter.toLowerCase()) || (m.chauffeur_principal||'').toLowerCase().includes(machineFilter.toLowerCase());
+        const visibleCamions = camionsList.filter(filterFn);
+        const visibleEngins  = enginsList.filter(filterFn);
+        const allVisible     = [...visibleCamions, ...visibleEngins];
+        const allVisibleSelected = allVisible.length > 0 && allVisible.every(m => selectedMachines.includes(m.code));
+        const someSelected   = selectedMachines.length > 0;
+
+        return (
+          <div className="fixed inset-0 bg-black/60 backdrop-blur-sm flex items-center justify-center z-50 p-4">
+            <div className="bg-white rounded-2xl shadow-2xl w-full max-w-2xl max-h-[90vh] flex flex-col">
+
+              {/* Header */}
+              <div className="p-5 border-b border-gray-100 flex items-center justify-between flex-shrink-0">
+                <div>
+                  <h2 className="font-bold text-gray-900 text-lg">Enregistrer un Arrêt</h2>
+                  <p className="text-xs text-gray-400 mt-0.5">
+                    {someSelected
+                      ? <span className="text-amber-600 font-semibold">{selectedMachines.length} machine(s) sélectionnée(s)</span>
+                      : 'Sélectionnez une ou plusieurs machines'}
                   </p>
-                )}
+                </div>
+                <button onClick={() => setShowForm(false)} className="w-8 h-8 flex items-center justify-center rounded-lg bg-gray-100 text-gray-500 text-sm hover:bg-gray-200">✕</button>
               </div>
-              <button onClick={() => setShowForm(false)} className="w-8 h-8 flex items-center justify-center rounded-lg bg-gray-100 text-gray-500 text-sm">✕</button>
-            </div>
-            <form onSubmit={handleSubmit} className="p-5 space-y-4">
-              <div>
-                <label className="text-xs font-semibold text-gray-400 uppercase tracking-wide block mb-1.5">Date *</label>
-                <input type="date" value={form.date} onChange={e=>setForm({...form,date:e.target.value})} required className={inputCls}
-                  min={cycle.from} max={cycle.to}/>
-              </div>
-              <div>
-                <label className="text-xs font-semibold text-gray-400 uppercase tracking-wide block mb-1.5">
-                  Engin concerné <span className="text-red-400">*</span>
-                  <span className="text-gray-300 normal-case font-normal ml-1">({allMachines.length} machines)</span>
-                </label>
-                <select value={form.engin_code} onChange={e=>setForm({...form,engin_code:e.target.value})} required className={inputCls}>
-                  <option value="">— Sélectionner une machine —</option>
-                  {/* Camions group */}
-                  <optgroup label="🚛 Camions & Tombereaux">
-                    {allMachines.filter(m=>m.type==='CAMION'||m.type==='TOMBEREAU').map(m => (
-                      <option key={m.code} value={m.code}>
-                        {m.code} — {m.chauffeur_principal||'?'} / {m.chauffeur_secondaire||'?'}
-                      </option>
-                    ))}
-                  </optgroup>
-                  {/* Engins group */}
-                  <optgroup label="🔧 Engins de Chantier (Pelles, Niveleuses...)">
-                    {allMachines.filter(m=>m.type!=='CAMION'&&m.type!=='TOMBEREAU').map(m => (
-                      <option key={m.code} value={m.code}>
-                        {m.code} — {m.type} — {m.chauffeur_principal||'?'}
-                      </option>
-                    ))}
-                  </optgroup>
-                </select>
-                {/* Show selected machine drivers */}
-                {selectedMachine && (
-                  <div className="mt-1.5 px-3 py-2 bg-blue-50 border border-blue-100 rounded-lg text-xs text-blue-700">
-                    <span className="font-semibold">Conducteurs :</span> {selectedMachine.chauffeur_principal||'—'} / {selectedMachine.chauffeur_secondaire||'—'}
+
+              <form onSubmit={handleSubmit} className="flex flex-col flex-1 overflow-hidden">
+                <div className="flex flex-1 overflow-hidden">
+
+                  {/* Colonne gauche — sélection machines */}
+                  <div className="w-72 border-r border-gray-100 flex flex-col flex-shrink-0">
+                    <div className="p-3 border-b border-gray-50">
+                      {/* Recherche */}
+                      <input
+                        type="text" value={machineFilter}
+                        onChange={e => setMachineFilter(e.target.value)}
+                        placeholder="🔍 Rechercher..."
+                        className="w-full bg-gray-50 border border-gray-200 rounded-lg px-3 py-1.5 text-xs focus:outline-none focus:border-blue-400 mb-2"
+                      />
+                      {/* Tout sélectionner */}
+                      <label className="flex items-center gap-2 cursor-pointer px-1 py-1 rounded-lg hover:bg-gray-50 select-none">
+                        <input
+                          type="checkbox"
+                          checked={allVisibleSelected}
+                          onChange={() => toggleAll(allVisible)}
+                          className="w-4 h-4 rounded accent-blue-600"
+                        />
+                        <span className="text-xs font-bold text-gray-600">
+                          {allVisibleSelected ? 'Tout désélectionner' : 'Tout sélectionner'}
+                        </span>
+                        <span className="ml-auto text-xs text-gray-400">{allVisible.length}</span>
+                      </label>
+                    </div>
+
+                    {/* Liste machines scrollable */}
+                    <div className="overflow-y-auto flex-1 p-2">
+                      {/* Camions */}
+                      {visibleCamions.length > 0 && (
+                        <>
+                          <div className="flex items-center gap-2 px-2 py-1.5 mb-1">
+                            <span className="text-xs font-bold text-gray-400 uppercase tracking-wide">🚛 Camions</span>
+                            <button type="button" onClick={() => toggleAll(visibleCamions)}
+                              className="ml-auto text-xs text-blue-500 font-semibold hover:text-blue-700">
+                              {visibleCamions.every(m => selectedMachines.includes(m.code)) ? 'Aucun' : 'Tous'}
+                            </button>
+                          </div>
+                          {visibleCamions.map(m => {
+                            const checked = selectedMachines.includes(m.code);
+                            return (
+                              <label key={m.code} className={`flex items-center gap-2.5 px-2 py-2 rounded-lg cursor-pointer select-none transition-colors ${checked ? 'bg-amber-50 border border-amber-200' : 'hover:bg-gray-50'}`}>
+                                <input type="checkbox" checked={checked} onChange={() => toggleMachine(m.code)} className="w-4 h-4 rounded accent-amber-500"/>
+                                <div className="flex-1 min-w-0">
+                                  <div className="text-xs font-bold text-blue-700 font-mono">{m.code}</div>
+                                  <div className="text-xs text-gray-400 truncate">{m.chauffeur_principal || '—'}</div>
+                                </div>
+                              </label>
+                            );
+                          })}
+                        </>
+                      )}
+
+                      {/* Engins */}
+                      {visibleEngins.length > 0 && (
+                        <>
+                          <div className="flex items-center gap-2 px-2 py-1.5 mt-2 mb-1">
+                            <span className="text-xs font-bold text-gray-400 uppercase tracking-wide">🔧 Engins</span>
+                            <button type="button" onClick={() => toggleAll(visibleEngins)}
+                              className="ml-auto text-xs text-blue-500 font-semibold hover:text-blue-700">
+                              {visibleEngins.every(m => selectedMachines.includes(m.code)) ? 'Aucun' : 'Tous'}
+                            </button>
+                          </div>
+                          {visibleEngins.map(m => {
+                            const checked = selectedMachines.includes(m.code);
+                            return (
+                              <label key={m.code} className={`flex items-center gap-2.5 px-2 py-2 rounded-lg cursor-pointer select-none transition-colors ${checked ? 'bg-amber-50 border border-amber-200' : 'hover:bg-gray-50'}`}>
+                                <input type="checkbox" checked={checked} onChange={() => toggleMachine(m.code)} className="w-4 h-4 rounded accent-amber-500"/>
+                                <div className="flex-1 min-w-0">
+                                  <div className="text-xs font-bold text-purple-700 font-mono">{m.code}</div>
+                                  <div className="text-xs text-gray-400 truncate">{m.type} {m.chauffeur_principal ? `— ${m.chauffeur_principal}` : ''}</div>
+                                </div>
+                              </label>
+                            );
+                          })}
+                        </>
+                      )}
+
+                      {allVisible.length === 0 && (
+                        <div className="text-center py-6 text-xs text-gray-400">Aucun résultat</div>
+                      )}
+                    </div>
+
+                    {/* Récap sélection */}
+                    {someSelected && (
+                      <div className="p-3 border-t border-gray-100 bg-amber-50">
+                        <div className="text-xs font-semibold text-amber-700 mb-1.5">
+                          {selectedMachines.length} machine(s) :
+                        </div>
+                        <div className="flex flex-wrap gap-1">
+                          {selectedMachines.map(code => (
+                            <span key={code} className="inline-flex items-center gap-1 text-xs bg-white border border-amber-200 text-amber-800 px-2 py-0.5 rounded-full font-mono font-bold">
+                              {code}
+                              <button type="button" onClick={() => toggleMachine(code)} className="text-amber-400 hover:text-amber-700 font-sans">×</button>
+                            </span>
+                          ))}
+                        </div>
+                      </div>
+                    )}
                   </div>
-                )}
-              </div>
-              <div>
-                <label className="text-xs font-semibold text-gray-400 uppercase tracking-wide block mb-1.5">Type d'Arrêt *</label>
-                <select value={form.type_arret} onChange={e=>setForm({...form,type_arret:e.target.value})} required className={inputCls}>
-                  <option value="">Sélectionner...</option>
-                  {TYPES_ARRET.map(t=><option key={t} value={t}>{t}</option>)}
-                </select>
-              </div>
-              <div>
-                <label className="text-xs font-semibold text-gray-400 uppercase tracking-wide block mb-1.5">Durée (heures) *</label>
-                <input type="number" step="0.5" min="0.5" max="24" value={form.duree_heures}
-                  onChange={e=>setForm({...form,duree_heures:e.target.value})} required className={inputCls} placeholder="Ex: 2.5"/>
-              </div>
-              <div>
-                <label className="text-xs font-semibold text-gray-400 uppercase tracking-wide block mb-1.5">Description</label>
-                <textarea value={form.description} onChange={e=>setForm({...form,description:e.target.value})}
-                  rows={2} placeholder="Détails de l'arrêt..." className={inputCls+' resize-none'}/>
-              </div>
-              <div className="flex gap-3 justify-end pt-2 border-t border-gray-100">
-                <button type="button" onClick={() => setShowForm(false)} className="px-4 py-2 text-sm font-medium text-gray-600 bg-gray-100 rounded-xl">Annuler</button>
-                <button type="submit" disabled={saving} className="px-5 py-2 text-sm font-semibold text-white rounded-xl disabled:opacity-50"
-                  style={{background:'linear-gradient(135deg,#F59E0B,#D97706)'}}>
-                  {saving ? 'Enregistrement...' : 'Enregistrer'}
-                </button>
-              </div>
-            </form>
+
+                  {/* Colonne droite — champs arrêt */}
+                  <div className="flex-1 overflow-y-auto p-5 space-y-4">
+
+                    {!someSelected && (
+                      <div className="bg-amber-50 border border-amber-200 rounded-xl p-3 text-xs text-amber-700 font-medium">
+                        ⬅ Sélectionnez au moins une machine
+                      </div>
+                    )}
+
+                    {/* Conducteur info si une seule machine */}
+                    {selectedMachine && (
+                      <div className="bg-blue-50 border border-blue-100 rounded-xl p-3 text-xs text-blue-700">
+                        <span className="font-semibold">Conducteurs :</span>{' '}
+                        {selectedMachine.chauffeur_principal || '—'} / {selectedMachine.chauffeur_secondaire || '—'}
+                      </div>
+                    )}
+
+                    <div>
+                      <label className="text-xs font-semibold text-gray-400 uppercase tracking-wide block mb-1.5">Date *</label>
+                      <input type="date" value={form.date} onChange={e=>setForm({...form,date:e.target.value})} required className={inputCls}
+                        min={cycle.from} max={cycle.to}/>
+                    </div>
+
+                    <div>
+                      <label className="text-xs font-semibold text-gray-400 uppercase tracking-wide block mb-1.5">Type d'Arrêt *</label>
+                      <select value={form.type_arret} onChange={e=>setForm({...form,type_arret:e.target.value})} required className={inputCls}>
+                        <option value="">— Sélectionner —</option>
+                        {TYPES_ARRET.map(t=><option key={t} value={t}>{t}</option>)}
+                      </select>
+                    </div>
+
+                    <div>
+                      <label className="text-xs font-semibold text-gray-400 uppercase tracking-wide block mb-1.5">Durée (heures) *</label>
+                      <input type="number" step="0.5" min="0.5" max="24" value={form.duree_heures}
+                        onChange={e=>setForm({...form,duree_heures:e.target.value})} required className={inputCls} placeholder="Ex: 2.5"/>
+                    </div>
+
+                    <div>
+                      <label className="text-xs font-semibold text-gray-400 uppercase tracking-wide block mb-1.5">Description</label>
+                      <textarea value={form.description} onChange={e=>setForm({...form,description:e.target.value})}
+                        rows={3} placeholder="Détails de l'arrêt..." className={inputCls+' resize-none'}/>
+                    </div>
+
+                    {/* Résumé si multi */}
+                    {selectedMachines.length > 1 && form.type_arret && form.duree_heures && (
+                      <div className="bg-gray-50 border border-gray-200 rounded-xl p-3 text-xs text-gray-600">
+                        <div className="font-semibold text-gray-700 mb-1">📋 Résumé :</div>
+                        <div>{selectedMachines.length} arrêts de type <b>{form.type_arret}</b> seront créés</div>
+                        <div>Durée : <b>{form.duree_heures}h</b> chacun — Total : <b>{(parseFloat(form.duree_heures||0)*selectedMachines.length).toFixed(1)}h</b></div>
+                      </div>
+                    )}
+                  </div>
+                </div>
+
+                {/* Footer */}
+                <div className="flex gap-3 justify-end p-5 border-t border-gray-100 flex-shrink-0">
+                  <button type="button" onClick={() => setShowForm(false)} className="px-4 py-2 text-sm font-medium text-gray-600 bg-gray-100 rounded-xl hover:bg-gray-200">
+                    Annuler
+                  </button>
+                  <button type="submit" disabled={saving || !someSelected}
+                    className="px-5 py-2 text-sm font-semibold text-white rounded-xl disabled:opacity-40 transition-opacity"
+                    style={{background:'linear-gradient(135deg,#F59E0B,#D97706)'}}>
+                    {saving
+                      ? 'Enregistrement...'
+                      : selectedMachines.length > 1
+                        ? `Enregistrer ${selectedMachines.length} arrêts`
+                        : 'Enregistrer'}
+                  </button>
+                </div>
+              </form>
+            </div>
           </div>
-        </div>
-      )}
+        );
+      })()}
     </div>
   );
 }
