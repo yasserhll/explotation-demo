@@ -1,430 +1,1091 @@
-import { useState, useEffect } from 'react';
-import { rotationAPI } from '../services/api';
-import { exportRapportMensuelPDF, exportRapportHebdoPDF } from '../utils/pdfExport';
-import {
-  ComposedChart, Bar, Line, Area, AreaChart,
-  XAxis, YAxis, CartesianGrid, Tooltip,
-  ResponsiveContainer, ReferenceLine
-} from 'recharts';
+import { useState, useEffect, useRef } from 'react';
+import { rotationAPI, arretAPI } from '../services/api';
 
-const fmt = n => Number(n||0).toLocaleString('fr-FR');
+const fmt = n => Number(n || 0).toLocaleString('fr-FR');
+const fmtDec = (n, d = 1) => Number(n || 0).toFixed(d).replace('.', ',');
+
+const MONTH_NAMES = ['Janvier', 'Février', 'Mars', 'Avril', 'Mai', 'Juin',
+  'Juillet', 'Août', 'Septembre', 'Octobre', 'Novembre', 'Décembre'];
 
 function ocpMonthRange(year, month) {
-  const y=parseInt(year), m=parseInt(month);
+  const y = parseInt(year), m = parseInt(month);
   return {
-    from: new Date(m===1?y-1:y, m===1?11:m-2, 27).toISOString().slice(0,10),
-    to:   new Date(y, m-1, 26).toISOString().slice(0,10),
+    from: new Date(m === 1 ? y - 1 : y, m === 1 ? 11 : m - 2, 27).toISOString().slice(0, 10),
+    to: new Date(y, m - 1, 26).toISOString().slice(0, 10),
   };
 }
 
-function buildWeeks(daily) {
-  if (!daily.length) return [];
-  const weeks = [];
-  let week = { label:'', days:[], vol_phosphate:0, vol_sterile:0, total_volume:0, total_voyages:0 };
-  daily.forEach((d, i) => {
-    week.days.push(d);
-    week.vol_phosphate += parseFloat(d.volume_phosphate)||0;
-    week.vol_sterile   += parseFloat(d.volume_sterile)||0;
-    week.total_volume  += parseFloat(d.total_volume)||0;
-    week.total_voyages += parseInt(d.total_voyages)||0;
-    if (week.days.length===7 || i===daily.length-1) {
-      const first = week.days[0].date?.slice(5);
-      const last  = week.days[week.days.length-1].date?.slice(5);
-      week.label = `${first}→${last}`;
-      week.from  = week.days[0].date;
-      week.to    = week.days[week.days.length-1].date;
-      weeks.push({...week});
-      week = { label:'', days:[], vol_phosphate:0, vol_sterile:0, total_volume:0, total_voyages:0 };
-    }
+function fmtDateFR(iso) {
+  if (!iso) return '';
+  try {
+    return new Date(iso.slice(0, 10) + 'T12:00:00').toLocaleDateString('fr-FR', { weekday: 'long', day: '2-digit', month: 'long', year: 'numeric' });
+  } catch { return iso; }
+}
+
+function fmtDateShort(iso) {
+  if (!iso) return '';
+  try {
+    return new Date(iso.slice(0, 10) + 'T12:00:00').toLocaleDateString('fr-FR', { day: '2-digit', month: '2-digit' });
+  } catch { return iso; }
+}
+
+function calcFromRotations(rotations) {
+  const vgsPhos = rotations.reduce((s, r) =>
+    s + (r.phosphate_p1a_vgs || 0) + (r.phosphate_p1b_vgs || 0) +
+    (r.phosphate_p2a_vgs || 0) + (r.phosphate_p2b_vgs || 0), 0);
+  const vgsSter = rotations.reduce((s, r) =>
+    s + (r.sterile_p1a_vgs || 0) + (r.sterile_p1b_vgs || 0) +
+    (r.sterile_p2a_vgs || 0) + (r.sterile_p2b_vgs || 0), 0);
+  return {
+    voyages_phosphate: vgsPhos, voyages_sterile: vgsSter,
+    total_voyages: vgsPhos + vgsSter,
+    volume_phosphate: vgsPhos * 16, volume_sterile: vgsSter * 14,
+    total_volume: vgsPhos * 16 + vgsSter * 14,
+  };
+}
+
+function getPanneauRows(rotations) {
+  const map = {};
+  rotations.forEach(r => {
+    [
+      { panneau: r.sterile_p1a_panneau, km: r.sterile_p1a_km, vgs: r.sterile_p1a_vgs, type: 'STERILE', poste: 1 },
+      { panneau: r.sterile_p1b_panneau, km: r.sterile_p1b_km, vgs: r.sterile_p1b_vgs, type: 'STERILE', poste: 1 },
+      { panneau: r.sterile_p2a_panneau, km: r.sterile_p2a_km, vgs: r.sterile_p2a_vgs, type: 'STERILE', poste: 2 },
+      { panneau: r.sterile_p2b_panneau, km: r.sterile_p2b_km, vgs: r.sterile_p2b_vgs, type: 'STERILE', poste: 2 },
+      { panneau: r.phosphate_p1a_panneau, km: r.phosphate_p1a_km, vgs: r.phosphate_p1a_vgs, type: 'PHOSPHATE', poste: 1 },
+      { panneau: r.phosphate_p1b_panneau, km: r.phosphate_p1b_km, vgs: r.phosphate_p1b_vgs, type: 'PHOSPHATE', poste: 1 },
+      { panneau: r.phosphate_p2a_panneau, km: r.phosphate_p2a_km, vgs: r.phosphate_p2a_vgs, type: 'PHOSPHATE', poste: 2 },
+      { panneau: r.phosphate_p2b_panneau, km: r.phosphate_p2b_km, vgs: r.phosphate_p2b_vgs, type: 'PHOSPHATE', poste: 2 },
+    ].forEach(({ panneau, km, vgs, type, poste }) => {
+      if (!panneau || !vgs) return;
+      const parts = panneau.split('/').map(s => s.trim());
+      const dest = parts[1] || parts[0];
+      const tranchee = parts[0];
+      const key = `${type}||${tranchee}||${dest}`;
+      if (!map[key]) map[key] = { type, tranchee, dest, km: parseFloat(km) || 0, vgs_1er: 0, vgs_2e: 0 };
+      if (poste === 1) map[key].vgs_1er += (vgs || 0);
+      else map[key].vgs_2e += (vgs || 0);
+    });
   });
-  return weeks;
+  return Object.values(map).map(row => ({
+    ...row,
+    total: row.vgs_1er + row.vgs_2e,
+    volume: (row.vgs_1er + row.vgs_2e) * (row.type === 'PHOSPHATE' ? 16 : 14),
+  }));
 }
 
-const MONTH_NAMES = ['Janvier','Février','Mars','Avril','Mai','Juin','Juillet','Août','Septembre','Octobre','Novembre','Décembre'];
-
-const CustomTooltip = ({ active, payload, label }) => {
-  if (!active || !payload?.length) return null;
-  return (
-    <div className="bg-white border border-gray-200 rounded-xl p-3 shadow-lg text-xs">
-      <p className="font-bold text-gray-700 mb-2">{label}</p>
-      {payload.map((p,i) => (
-        <div key={i} className="flex items-center gap-2 mb-0.5">
-          <span className="w-2 h-2 rounded-full flex-shrink-0" style={{background:p.color||p.stroke}}/>
-          <span className="text-gray-600">{p.name}:</span>
-          <span className="font-bold">{Number(p.value).toLocaleString('fr-FR')}{p.name?.includes('m³')||p.name?.includes('Volume')?' m³':''}</span>
-        </div>
-      ))}
-    </div>
-  );
-};
-
-function RapportTypeCard({ icon, title, desc, active, onClick }) {
-  return (
-    <button onClick={onClick}
-      className={`flex-1 p-4 rounded-2xl border-2 text-left transition-all ${active?'border-blue-600 bg-blue-50/60':'border-gray-100 bg-white hover:border-gray-200 hover:bg-gray-50/50'}`}
-      style={active?{boxShadow:'0 0 0 3px rgba(0,75,141,0.12)'}:{boxShadow:'0 1px 4px rgba(0,0,0,0.04)'}}>
-      <div className="text-2xl mb-2">{icon}</div>
-      <div className={`text-sm font-bold ${active?'text-blue-700':'text-gray-800'}`}>{title}</div>
-      <div className="text-xs text-gray-400 mt-0.5">{desc}</div>
-    </button>
-  );
+function getDateTrancheeMap(rotations) {
+  const map = {};
+  rotations.forEach(r => {
+    const d = r._date || (r.date ? r.date.slice(0, 10) : null);
+    if (!d) return;
+    [
+      { panneau: r.sterile_p1a_panneau, vgs: r.sterile_p1a_vgs, type: 'STERILE' },
+      { panneau: r.sterile_p1b_panneau, vgs: r.sterile_p1b_vgs, type: 'STERILE' },
+      { panneau: r.sterile_p2a_panneau, vgs: r.sterile_p2a_vgs, type: 'STERILE' },
+      { panneau: r.sterile_p2b_panneau, vgs: r.sterile_p2b_vgs, type: 'STERILE' },
+      { panneau: r.phosphate_p1a_panneau, vgs: r.phosphate_p1a_vgs, type: 'PHOSPHATE' },
+      { panneau: r.phosphate_p1b_panneau, vgs: r.phosphate_p1b_vgs, type: 'PHOSPHATE' },
+      { panneau: r.phosphate_p2a_panneau, vgs: r.phosphate_p2a_vgs, type: 'PHOSPHATE' },
+      { panneau: r.phosphate_p2b_panneau, vgs: r.phosphate_p2b_vgs, type: 'PHOSPHATE' },
+    ].forEach(({ panneau, vgs, type }) => {
+      if (!panneau || !vgs) return;
+      const parts = panneau.split('/').map(s => s.trim());
+      const k = `${type}||${parts[0]}||${parts[1] || parts[0]}`;
+      if (!map[k]) map[k] = {};
+      map[k][d] = (map[k][d] || 0) + (vgs || 0);
+    });
+  });
+  return map;
 }
 
-export default function Rapports() {
-  const today = new Date();
-  const [reportType, setReportType] = useState('month');
-  const [viewYear,  setViewYear]  = useState(String(today.getFullYear()));
-  const [viewMonth, setViewMonth] = useState(String(today.getMonth()+1).padStart(2,'0'));
-  const [data,      setData]      = useState(null);
-  const [loading,   setLoading]   = useState(true);
-  const [periodMode, setPeriodMode] = useState('month');
-  const [customFrom, setCustomFrom] = useState('');
-  const [customTo,   setCustomTo]   = useState('');
-  const [activeMonth, setActiveMonth] = useState('');
+const TH = ({ children, style = {} }) => (
+  <th style={{ padding: '7px 9px', fontSize: '10px', fontWeight: 700, color: 'white', whiteSpace: 'nowrap', textAlign: 'left', letterSpacing: '0.3px', ...style }}>
+    {children}
+  </th>
+);
+const TD = ({ children, style = {} }) => (
+  <td style={{ padding: '6px 9px', fontSize: '11px', borderBottom: '1px solid #F1F5F9', whiteSpace: 'nowrap', ...style }}>
+    {children}
+  </td>
+);
 
-  const monthLabel = `${MONTH_NAMES[parseInt(viewMonth)-1]} ${viewYear}`;
-  const cycleLabel = (() => {
-    const y=parseInt(viewYear), m=parseInt(viewMonth);
-    const mp=m===1?12:m-1; const yp=m===1?y-1:y;
-    return `27 ${MONTH_NAMES[mp-1].slice(0,3)} ${yp} → 26 ${MONTH_NAMES[m-1].slice(0,3)} ${y}`;
-  })();
+// ══════════════════════════════════════════════════
+// RAPPORT JOURNALIER
+// ══════════════════════════════════════════════════
+function RapportJournalier() {
+  const [date, setDate] = useState(() => new Date().toISOString().slice(0, 10));
+  const [rotations, setRotations] = useState([]);
+  const [arrets, setArrets] = useState([]);
+  const [dispo, setDispo] = useState(null);
+  const [loading, setLoading] = useState(false);
+  const printRef = useRef(null);
 
-  const changeMonth = dir => {
-    let y=parseInt(viewYear), m=parseInt(viewMonth)+dir;
-    if(m>12){m=1;y++;} if(m<1){m=12;y--;}
-    setViewYear(String(y)); setViewMonth(String(m).padStart(2,'0'));
+  const load = async (d) => {
+    setLoading(true);
+    try {
+      const [rot, arr, dp] = await Promise.all([
+        rotationAPI.getByDate(d),
+        arretAPI.getAll({ from: d, to: d }),
+        arretAPI.getDisponibilite({ from: d, to: d }),
+      ]);
+      setRotations(rot.data.rotations || []);
+      setArrets(arr.data.data || []);
+      setDispo(dp.data);
+    } catch (e) { console.error(e); }
+    setLoading(false);
   };
 
-  useEffect(() => {
-    setLoading(true);
-    const monthParam = `${viewYear}-${viewMonth}`;
-    rotationAPI.getMonthly(monthParam)
-      .then(r => { setData(r.data); setActiveMonth(r.data.month||monthParam); setLoading(false); })
-      .catch(() => setLoading(false));
-  }, [viewYear, viewMonth]);
+  useEffect(() => { load(date); }, [date]);
 
-  const daily = data?.daily_summary || [];
-  const weeks = buildWeeks(daily);
+  const totals = calcFromRotations(rotations);
+  const panneauRows = getPanneauRows(rotations);
+  const phosphateRows = panneauRows.filter(r => r.type === 'PHOSPHATE');
+  const sterileRows = panneauRows.filter(r => r.type === 'STERILE');
+  const totalPhos = { vgs: phosphateRows.reduce((s, r) => s + r.total, 0), vol: phosphateRows.reduce((s, r) => s + r.volume, 0) };
+  const totalSter = { vgs: sterileRows.reduce((s, r) => s + r.total, 0), vol: sterileRows.reduce((s, r) => s + r.volume, 0) };
 
-  const weeklyTableData = weeks.map((w,i) => ({
-    num: i+1,
-    from: w.from,
-    to: w.to,
-    label: w.label,
-    jours: w.days.filter(d=>parseFloat(d.total_volume)>0).length,
-    vol_phosphate: Math.round(w.vol_phosphate),
-    vol_sterile: Math.round(w.vol_sterile),
-    total_volume: Math.round(w.total_volume),
-    total_voyages: w.total_voyages,
-    eff: w.total_voyages>0 ? Math.round(w.total_volume/w.total_voyages) : 0,
-    daily: w.days,
-  }));
-
-  const chartData = (() => {
-    const src = periodMode==='month' ? daily
-      : periodMode==='week' ? weeks.map(w=>({date:w.label,...w}))
-      : (!customFrom||!customTo) ? daily : daily.filter(d=>d.date>=customFrom&&d.date<=customTo);
-    if (periodMode==='week') {
-      return weeks.map(w=>({ label:w.label, 'Phosphate m³':Math.round(w.vol_phosphate), 'Stérile m³':Math.round(w.vol_sterile), 'Total m³':Math.round(w.total_volume), 'Voyages':w.total_voyages, eff:w.total_voyages>0?Math.round(w.total_volume/w.total_voyages):0 }));
-    }
-    return src.map(d=>({ label:d.date?.slice(5)||d.label, 'Phosphate m³':parseFloat(d.volume_phosphate)||0, 'Stérile m³':parseFloat(d.volume_sterile)||0, 'Total m³':parseFloat(d.total_volume)||0, 'Voyages':parseInt(d.total_voyages)||0, eff:d.total_voyages>0?Math.round(d.total_volume/d.total_voyages):0 }));
-  })();
-
-  let cumul=0;
-  const chartWithCumul = chartData.map(d=>{cumul+=d['Total m³'];return{...d,'Cumul m³':Math.round(cumul)};});
-
-  const periodTotals = chartData.reduce((a,d)=>({vol_phos:a.vol_phos+d['Phosphate m³'],vol_ster:a.vol_ster+d['Stérile m³'],total:a.total+d['Total m³'],voyages:a.voyages+d['Voyages']}),{vol_phos:0,vol_ster:0,total:0,voyages:0});
+  const handlePrint = () => {
+    const w = window.open('', '_blank');
+    w.document.write(`<html><head><title>Rapport ${date}</title><style>
+      body{font-family:Arial,sans-serif;font-size:10px;color:#1a2332;padding:20px}
+      h1{font-size:15px;font-weight:800;margin-bottom:2px}
+      table{width:100%;border-collapse:collapse;margin-bottom:14px}
+      th{background:#004B8D;color:white;padding:5px 7px;text-align:left;font-size:9px}
+      td{padding:4px 7px;border-bottom:1px solid #E5E7EB;font-size:9px}
+      tr:nth-child(even)td{background:#F8FAFC}
+      .tot td{background:#1a2332;color:white;font-weight:700}
+      .sec{font-size:12px;font-weight:700;margin:12px 0 4px;color:#004B8D;border-bottom:2px solid #004B8D;padding-bottom:3px}
+      @media print{@page{size:A4 landscape}}
+    </style></head><body>${printRef.current?.innerHTML || ''}</body></html>`);
+    w.document.close();
+    setTimeout(() => { w.print(); w.close(); }, 400);
+  };
 
   return (
-    <div className="space-y-5 max-w-7xl mx-auto">
-
-      {/* Controls */}
-      <div className="bg-white rounded-2xl p-4 border border-gray-100/80 space-y-4" style={{boxShadow:'0 1px 8px rgba(0,0,0,0.05)'}}>
-        <div className="flex flex-wrap gap-3 items-center justify-between">
-          <div className="flex items-center gap-2">
-            <button onClick={()=>changeMonth(-1)} className="w-8 h-8 flex items-center justify-center rounded-xl bg-gray-100 hover:bg-gray-200 text-gray-600">
-              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" className="w-4 h-4"><polyline points="15 18 9 12 15 6"/></svg>
-            </button>
-            <div className="text-center min-w-36">
-              <div className="font-bold text-gray-800">{monthLabel}</div>
-              <div className="text-xs text-blue-600 font-medium">{cycleLabel}</div>
-            </div>
-            <button onClick={()=>changeMonth(1)} className="w-8 h-8 flex items-center justify-center rounded-xl bg-gray-100 hover:bg-gray-200 text-gray-600">
-              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" className="w-4 h-4"><polyline points="9 18 15 12 9 6"/></svg>
-            </button>
-          </div>
-          <div className="flex gap-1.5 bg-gray-100 rounded-xl p-1">
-            {[['month','Par Mois'],['week','Par Semaine'],['custom','Période libre']].map(([m,l])=>(
-              <button key={m} onClick={()=>setPeriodMode(m)}
-                className={`px-3 py-1.5 rounded-lg text-xs font-semibold transition-all ${periodMode===m?'bg-white text-blue-700 shadow-sm':'text-gray-500 hover:text-gray-700'}`}>{l}</button>
-            ))}
-          </div>
-          {periodMode==='custom'&&(
-            <div className="flex gap-2 items-center">
-              <input type="date" value={customFrom} onChange={e=>setCustomFrom(e.target.value)} className="bg-gray-50 border border-gray-200 rounded-lg px-3 py-1.5 text-sm" style={{width:'145px'}}/>
-              <span className="text-gray-400">→</span>
-              <input type="date" value={customTo} onChange={e=>setCustomTo(e.target.value)} className="bg-gray-50 border border-gray-200 rounded-lg px-3 py-1.5 text-sm" style={{width:'145px'}}/>
-            </div>
-          )}
-        </div>
+    <div className="space-y-4">
+      <div className="bg-white rounded-2xl p-4 border border-gray-100 flex flex-wrap items-center gap-4 justify-between" style={{ boxShadow: '0 1px 8px rgba(0,0,0,0.05)' }}>
         <div>
-          <p className="text-xs font-bold text-gray-400 uppercase tracking-wide mb-3">Type de rapport à générer :</p>
-          <div className="flex gap-3">
-            <RapportTypeCard icon="📄" title="Rapport Journalier" desc="Une journée + rotation chauffeurs" active={reportType==='day'} onClick={()=>setReportType('day')}/>
-            <RapportTypeCard icon="📅" title="Rapport Hebdomadaire" desc="Synthèse semaine par semaine (7 jours)" active={reportType==='week'} onClick={()=>setReportType('week')}/>
-            <RapportTypeCard icon="📊" title="Rapport Mensuel" desc="Bilan complet du cycle OCP (27→26)" active={reportType==='month'} onClick={()=>setReportType('month')}/>
-          </div>
+          <h2 className="text-base font-bold text-gray-800">Rapport de Production Journalière</h2>
+          <p className="text-xs text-gray-400">Site Minier BenGuerir — OCP Group</p>
+        </div>
+        <div className="flex items-center gap-3">
+          <input type="date" value={date} onChange={e => setDate(e.target.value)}
+            className="border border-gray-200 rounded-lg px-3 py-2 text-sm font-semibold focus:outline-none focus:ring-2 focus:ring-blue-400" />
+          <button onClick={handlePrint} className="flex items-center gap-2 px-4 py-2 rounded-xl text-sm font-bold text-white" style={{ background: 'linear-gradient(135deg,#004B8D,#0066CC)' }}>
+            🖨 Imprimer
+          </button>
         </div>
       </div>
 
       {loading ? (
-        <div className="flex items-center justify-center h-40"><div className="w-8 h-8 border-2 border-blue-500 border-t-transparent rounded-full animate-spin"/></div>
-      ) : !data ? (
-        <div className="bg-red-50 border border-red-200 rounded-2xl p-6 text-center text-red-600">Erreur de chargement</div>
+        <div className="flex justify-center items-center h-32"><div className="w-8 h-8 border-2 border-blue-600 border-t-transparent rounded-full animate-spin" /></div>
       ) : (
-        <>
-          {/* KPI */}
-          <div className="grid grid-cols-2 xl:grid-cols-5 gap-4">
-            {[{l:'Phosphate',v:fmt(periodTotals.vol_phos)+' m³',c:'#004B8D',bg:'#EFF6FF',b:'#BFDBFE'},{l:'Stérile',v:fmt(periodTotals.vol_ster)+' m³',c:'#B45309',bg:'#FFFBEB',b:'#FDE68A'},{l:'Volume Total',v:fmt(periodTotals.total)+' m³',c:'#00843D',bg:'#F0FDF4',b:'#BBF7D0'},{l:'Total Voyages',v:fmt(periodTotals.voyages),c:'#7C3AED',bg:'#F5F3FF',b:'#DDD6FE'},{l:'Jours travaillés',v:(periodMode==='month'?data?.jours_production:chartData.length)||0,c:'#374151',bg:'#F9FAFB',b:'#E5E7EB'}].map((k,i)=>(
-              <div key={i} className="rounded-2xl p-4" style={{background:k.bg,border:`1px solid ${k.b}`}}>
-                <div className="text-xs font-semibold mb-2" style={{color:k.c}}>{k.l}</div>
-                <div className="text-xl font-black stat-num" style={{color:k.c}}>{k.v}</div>
+        <div ref={printRef} className="space-y-4">
+          {/* HEADER */}
+          <div className="rounded-2xl overflow-hidden" style={{ background: 'linear-gradient(135deg,#0A1628,#004B8D,#00843D)', boxShadow: '0 4px 20px rgba(0,0,0,0.15)' }}>
+            <div className="px-6 py-5">
+              <div className="flex items-start justify-between">
+                <div>
+                  <h1 className="text-xl font-black text-white">Rapport de Production Journalière</h1>
+                  <p className="text-white/70 text-sm mt-0.5">Site de Benguerir — {fmtDateFR(date)}</p>
+                </div>
+                <div className="bg-white/15 border border-white/30 rounded-xl px-5 py-3 text-right">
+                  <div className="text-white/60 text-xs uppercase tracking-wider">Total Voyages</div>
+                  <div className="text-3xl font-black text-white">{fmt(totals.total_voyages)}</div>
+                  <div className="text-white/50 text-xs">{fmt(totals.total_volume)} m³</div>
+                </div>
               </div>
-            ))}
+              <div className="grid grid-cols-4 gap-3 mt-4">
+                {[
+                  { l: 'Voyages Phosphate', v: fmt(totals.voyages_phosphate), s: `${fmt(totals.volume_phosphate)} m³`, c: '#93C5FD' },
+                  { l: 'Voyages Stérile', v: fmt(totals.voyages_sterile), s: `${fmt(totals.volume_sterile)} m³`, c: '#FDE68A' },
+                  { l: 'Camions en activité', v: rotations.length, s: 'rotations saisies', c: '#6EE7B7' },
+                  { l: 'Taux Disponibilité', v: `${dispo?.taux_disponibilite_global ?? '—'}%`, s: `${arrets.length} arrêt(s)`, c: '#FCA5A5' },
+                ].map((k, i) => (
+                  <div key={i} className="bg-white/10 rounded-xl p-3 border border-white/20">
+                    <div style={{ fontSize: '10px', fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.5px', color: k.c + 'AA' }}>{k.l}</div>
+                    <div style={{ fontSize: '22px', fontWeight: 900, color: k.c, marginTop: '4px' }}>{k.v}</div>
+                    <div style={{ fontSize: '11px', color: k.c + '80', marginTop: '2px' }}>{k.s}</div>
+                  </div>
+                ))}
+              </div>
+            </div>
           </div>
 
-          {/* JOURNALIER */}
-          {reportType==='day' && (
-            <div className="bg-white rounded-2xl border border-gray-100/80 overflow-hidden" style={{boxShadow:'0 1px 8px rgba(0,0,0,0.05)'}}>
-              <div className="px-5 py-4 border-b border-gray-100">
-                <h3 className="font-bold text-gray-800">Journées du mois — {monthLabel}</h3>
-                <p className="text-xs text-gray-400 mt-0.5">Le rapport journalier complet (avec rotation chauffeurs) se génère depuis la page <strong>Rotation Chauffeurs</strong></p>
+          {/* PHOSPHATE */}
+          {phosphateRows.length > 0 && (
+            <div className="bg-white rounded-2xl overflow-hidden border border-blue-100" style={{ boxShadow: '0 1px 8px rgba(0,0,0,0.05)' }}>
+              <div className="flex items-center gap-3 px-5 py-3 border-b border-blue-100" style={{ background: '#F0F6FF' }}>
+                <span style={{ width: 10, height: 10, borderRadius: '50%', background: '#1D4ED8', display: 'inline-block' }} />
+                <span style={{ fontSize: '12px', fontWeight: 800, color: '#1D4ED8', textTransform: 'uppercase', letterSpacing: '1px' }}>Phosphate</span>
+                <span className="ml-auto" style={{ fontSize: '11px', fontWeight: 700, color: '#1D4ED8', background: '#DBEAFE', border: '1px solid #BFDBFE', padding: '2px 10px', borderRadius: '20px' }}>
+                  {fmt(totalPhos.vgs)} voyages · {fmt(totalPhos.vol)} m³
+                </span>
               </div>
-              <div className="overflow-x-auto">
-                <table className="w-full">
-                  <thead><tr style={{background:'#0D2B4E'}}>
-                    {['Date','Phosphate m³','Stérile m³','Total m³','Voyages','m³/vg','Statut'].map(c=>(
-                      <th key={c} className="text-left py-2.5 px-4 text-xs font-semibold text-gray-300 uppercase">{c}</th>
-                    ))}
-                  </tr></thead>
+              <div style={{ overflowX: 'auto' }}>
+                <table style={{ width: '100%', borderCollapse: 'collapse' }}>
+                  <thead>
+                    <tr style={{ background: '#1D4ED8' }}>
+                      {['Niveau / Tranchée', 'Destination', 'Distance km', 'Vgs 1er Poste', 'Vgs 2e Poste', 'Total Voyages', 'Volume m³'].map(h => <TH key={h}>{h}</TH>)}
+                    </tr>
+                  </thead>
                   <tbody>
-                    {daily.map((row,i)=>{
-                      const low=parseFloat(row.volume_phosphate)<3000&&parseFloat(row.volume_phosphate)>0;
-                      const eff=row.total_voyages>0?Math.round(row.total_volume/row.total_voyages):0;
-                      return (
-                        <tr key={i} className={`border-t border-gray-50 hover:bg-blue-50/20 ${low?'bg-red-50/40':i%2===0?'':'bg-gray-50/40'}`}>
-                          <td className="py-2.5 px-4 text-sm font-medium text-gray-700">{row.date}{low&&<span className="text-xs text-red-400 ml-1">⚠</span>}</td>
-                          <td className="py-2.5 px-4 text-sm font-bold stat-num" style={{color:'#004B8D'}}>{fmt(row.volume_phosphate)}</td>
-                          <td className="py-2.5 px-4 text-sm stat-num" style={{color:'#B45309'}}>{fmt(row.volume_sterile)}</td>
-                          <td className="py-2.5 px-4 text-sm font-bold stat-num">{fmt(row.total_volume)}</td>
-                          <td className="py-2.5 px-4 text-sm stat-num">{fmt(row.total_voyages)}</td>
-                          <td className={`py-2.5 px-4 text-sm font-bold stat-num ${eff>=14?'text-green-600':eff>0?'text-red-500':'text-gray-400'}`}>{eff||'—'}</td>
-                          <td className="py-2.5 px-4">{row.total_volume>0?<span className="text-xs font-semibold px-2 py-0.5 rounded-full bg-green-100 text-green-700">Produit</span>:<span className="text-xs font-semibold px-2 py-0.5 rounded-full bg-gray-100 text-gray-400">Vide</span>}</td>
-                        </tr>
-                      );
-                    })}
+                    {phosphateRows.map((row, i) => (
+                      <tr key={i} style={{ background: i % 2 === 0 ? '#EFF6FF' : 'white' }}>
+                        <TD style={{ fontWeight: 700, color: '#1D4ED8' }}>{row.tranchee}</TD>
+                        <TD>{row.dest}</TD>
+                        <TD style={{ textAlign: 'center', fontFamily: 'monospace' }}>{fmtDec(row.km)}</TD>
+                        <TD style={{ textAlign: 'center', fontWeight: 700, color: '#1D4ED8' }}>{row.vgs_1er || '—'}</TD>
+                        <TD style={{ textAlign: 'center', fontWeight: 700, color: '#1D4ED8' }}>{row.vgs_2e || '—'}</TD>
+                        <TD style={{ textAlign: 'center', fontWeight: 800, color: '#1E3A8A', fontSize: '13px' }}>{fmt(row.total)}</TD>
+                        <TD style={{ textAlign: 'center', fontWeight: 700, color: '#1E40AF' }}>{fmt(row.volume)}</TD>
+                      </tr>
+                    ))}
+                  </tbody>
+                  <tfoot>
+                    <tr style={{ background: '#1a2332' }}>
+                      <td colSpan={3} style={{ padding: '8px 9px', color: 'white', fontWeight: 700, fontSize: '11px' }}>TOTAL PHOSPHATE</td>
+                      <td style={{ padding: '8px 9px', textAlign: 'center', color: '#93C5FD', fontWeight: 900 }}>{fmt(phosphateRows.reduce((s, r) => s + r.vgs_1er, 0))}</td>
+                      <td style={{ padding: '8px 9px', textAlign: 'center', color: '#93C5FD', fontWeight: 900 }}>{fmt(phosphateRows.reduce((s, r) => s + r.vgs_2e, 0))}</td>
+                      <td style={{ padding: '8px 9px', textAlign: 'center', color: '#60A5FA', fontWeight: 900, fontSize: '15px' }}>{fmt(totalPhos.vgs)}</td>
+                      <td style={{ padding: '8px 9px', textAlign: 'center', color: '#93C5FD', fontWeight: 800 }}>{fmt(totalPhos.vol)}</td>
+                    </tr>
+                  </tfoot>
+                </table>
+              </div>
+            </div>
+          )}
+
+          {/* STERILE */}
+          {sterileRows.length > 0 && (
+            <div className="bg-white rounded-2xl overflow-hidden border border-amber-100" style={{ boxShadow: '0 1px 8px rgba(0,0,0,0.05)' }}>
+              <div className="flex items-center gap-3 px-5 py-3 border-b border-amber-100" style={{ background: '#FFFBEB' }}>
+                <span style={{ width: 10, height: 10, borderRadius: '50%', background: '#D97706', display: 'inline-block' }} />
+                <span style={{ fontSize: '12px', fontWeight: 800, color: '#D97706', textTransform: 'uppercase', letterSpacing: '1px' }}>Stérile / Décapage</span>
+                <span className="ml-auto" style={{ fontSize: '11px', fontWeight: 700, color: '#B45309', background: '#FEF3C7', border: '1px solid #FDE68A', padding: '2px 10px', borderRadius: '20px' }}>
+                  {fmt(totalSter.vgs)} voyages · {fmt(totalSter.vol)} m³
+                </span>
+              </div>
+              <div style={{ overflowX: 'auto' }}>
+                <table style={{ width: '100%', borderCollapse: 'collapse' }}>
+                  <thead>
+                    <tr style={{ background: '#D97706' }}>
+                      {['Niveau / Tranchée', 'Destination', 'Distance km', 'Vgs 1er Poste', 'Vgs 2e Poste', 'Total Voyages', 'Volume m³'].map(h => <TH key={h}>{h}</TH>)}
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {sterileRows.map((row, i) => (
+                      <tr key={i} style={{ background: i % 2 === 0 ? '#FFFBEB' : 'white' }}>
+                        <TD style={{ fontWeight: 700, color: '#D97706' }}>{row.tranchee}</TD>
+                        <TD>{row.dest}</TD>
+                        <TD style={{ textAlign: 'center', fontFamily: 'monospace' }}>{fmtDec(row.km)}</TD>
+                        <TD style={{ textAlign: 'center', fontWeight: 700, color: '#D97706' }}>{row.vgs_1er || '—'}</TD>
+                        <TD style={{ textAlign: 'center', fontWeight: 700, color: '#D97706' }}>{row.vgs_2e || '—'}</TD>
+                        <TD style={{ textAlign: 'center', fontWeight: 800, color: '#92400E', fontSize: '13px' }}>{fmt(row.total)}</TD>
+                        <TD style={{ textAlign: 'center', fontWeight: 700, color: '#B45309' }}>{fmt(row.volume)}</TD>
+                      </tr>
+                    ))}
+                  </tbody>
+                  <tfoot>
+                    <tr style={{ background: '#1a2332' }}>
+                      <td colSpan={3} style={{ padding: '8px 9px', color: 'white', fontWeight: 700, fontSize: '11px' }}>TOTAL STÉRILE</td>
+                      <td style={{ padding: '8px 9px', textAlign: 'center', color: '#FDE68A', fontWeight: 900 }}>{fmt(sterileRows.reduce((s, r) => s + r.vgs_1er, 0))}</td>
+                      <td style={{ padding: '8px 9px', textAlign: 'center', color: '#FDE68A', fontWeight: 900 }}>{fmt(sterileRows.reduce((s, r) => s + r.vgs_2e, 0))}</td>
+                      <td style={{ padding: '8px 9px', textAlign: 'center', color: '#FDE68A', fontWeight: 900, fontSize: '15px' }}>{fmt(totalSter.vgs)}</td>
+                      <td style={{ padding: '8px 9px', textAlign: 'center', color: '#FDE68A', fontWeight: 800 }}>{fmt(totalSter.vol)}</td>
+                    </tr>
+                  </tfoot>
+                </table>
+              </div>
+            </div>
+          )}
+
+          {phosphateRows.length === 0 && sterileRows.length === 0 && (
+            <div className="bg-white rounded-2xl p-12 text-center border border-gray-100">
+              <div className="text-4xl mb-3">📋</div>
+              <div className="font-semibold text-gray-500">Aucune rotation pour cette date</div>
+              <div className="text-sm text-gray-400 mt-1">Saisissez les données dans "Rotation Chauffeurs"</div>
+            </div>
+          )}
+
+          {/* REMARQUES */}
+          <div className="bg-white rounded-2xl border border-amber-200 overflow-hidden" style={{ boxShadow: '0 1px 8px rgba(0,0,0,0.04)' }}>
+            <div className="px-5 py-3 border-b border-amber-100" style={{ background: '#FFFBEB' }}>
+              <span style={{ fontSize: '12px', fontWeight: 800, color: '#92400E', textTransform: 'uppercase', letterSpacing: '0.5px' }}>📝 Remarques de la journée</span>
+            </div>
+            <div className="p-4 space-y-2">
+              {rotations.filter(r => r.commentaires).map((r, i) => (
+                <div key={i} className="flex gap-3 text-sm">
+                  <span className="font-bold text-amber-700 shrink-0 bg-amber-100 px-2 py-0.5 rounded">{r.camion_id}</span>
+                  <span className="text-gray-700">{r.commentaires}</span>
+                </div>
+              ))}
+              {rotations.filter(r => r.commentaires).length === 0 && <p className="text-sm text-gray-400 italic">Aucune remarque</p>}
+            </div>
+          </div>
+
+          {/* PARC ENGINS + GASOIL */}
+          <div className="grid grid-cols-2 gap-4">
+            <div className="bg-white rounded-2xl border border-gray-100 overflow-hidden" style={{ boxShadow: '0 1px 8px rgba(0,0,0,0.04)' }}>
+              <div className="px-5 py-3 border-b border-gray-100" style={{ background: '#F8FAFC' }}>
+                <span style={{ fontSize: '12px', fontWeight: 800, color: '#374151', textTransform: 'uppercase', letterSpacing: '0.5px' }}>🚛 État Parc Engins</span>
+              </div>
+              <table style={{ width: '100%', borderCollapse: 'collapse' }}>
+                <thead>
+                  <tr style={{ background: '#374151' }}>
+                    {['Type', 'Total Parc', 'Parc Dispo'].map(h => <TH key={h} style={{ textAlign: h === 'Type' ? 'left' : 'center' }}>{h}</TH>)}
+                  </tr>
+                </thead>
+                <tbody>
+                  {[
+                    { t: 'Camion 90T SITRAK', total: 4, dispo: 0 },
+                    { t: 'Camion 50T MAN', total: 26, dispo: rotations.length },
+                    { t: 'Pelle', total: 4, dispo: 4 },
+                    { t: 'Chargeuse', total: 2, dispo: 2 },
+                    { t: 'Niveleuse', total: 2, dispo: 2 },
+                    { t: 'Arroseur', total: 2, dispo: 1 },
+                  ].map((row, i) => (
+                    <tr key={i} style={{ background: i % 2 === 0 ? '#F9FAFB' : 'white' }}>
+                      <TD>{row.t}</TD>
+                      <TD style={{ textAlign: 'center', fontWeight: 700 }}>{row.total}</TD>
+                      <TD style={{ textAlign: 'center', fontWeight: 700, color: row.dispo < row.total ? '#DC2626' : '#16A34A' }}>{row.dispo}</TD>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+            <div className="bg-white rounded-2xl border border-gray-100 overflow-hidden" style={{ boxShadow: '0 1px 8px rgba(0,0,0,0.04)' }}>
+              <div className="px-5 py-3 border-b border-gray-100" style={{ background: '#F8FAFC' }}>
+                <span style={{ fontSize: '12px', fontWeight: 800, color: '#374151', textTransform: 'uppercase', letterSpacing: '0.5px' }}>⛽ Consommation Gasoil</span>
+              </div>
+              <div className="p-5 space-y-4">
+                {[
+                  { l: 'Camions', v: fmt(rotations.length * 165), c: '#1D4ED8' },
+                  { l: 'Engins', v: fmt(800), c: '#D97706' },
+                  { l: 'Total', v: fmt(rotations.length * 165 + 800), c: '#16A34A' },
+                ].map((item, i) => (
+                  <div key={i} className="flex justify-between items-center py-2 border-b border-gray-100 last:border-0">
+                    <span className="text-sm font-semibold text-gray-600">{item.l}</span>
+                    <span className="text-xl font-black" style={{ color: item.c }}>{item.v} <span className="text-sm">L</span></span>
+                  </div>
+                ))}
+              </div>
+            </div>
+          </div>
+
+          {/* TABLEAU ROTATIONS CHAUFFEURS */}
+          {rotations.length > 0 && (
+            <div className="bg-white rounded-2xl overflow-hidden border border-gray-100" style={{ boxShadow: '0 1px 8px rgba(0,0,0,0.05)' }}>
+              <div className="flex items-center gap-3 px-5 py-3 border-b border-gray-100" style={{ background: '#F8FAFC' }}>
+                <span style={{ width: 10, height: 10, borderRadius: '50%', background: '#10B981', display: 'inline-block' }} />
+                <span style={{ fontSize: '12px', fontWeight: 800, color: '#065F46', textTransform: 'uppercase', letterSpacing: '0.5px' }}>
+                  Rapport de Rotation des Chauffeurs — {fmtDateFR(date)}
+                </span>
+                <span className="ml-auto text-xs text-gray-400">{rotations.length} camion(s)</span>
+              </div>
+              <div style={{ overflowX: 'auto' }}>
+                <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '11px' }}>
+                  <thead>
+                    <tr style={{ background: '#0D2B4E' }}>
+                      <TH>Camion</TH>
+                      <TH>Chauffeur 1er</TH>
+                      <TH>Chauffeur 2e</TH>
+                      <TH style={{ background: '#1A1500', borderLeft: '3px solid #D97706' }}>Stérile P1 · Panneau</TH>
+                      <TH style={{ background: '#1A1500' }}>km</TH>
+                      <TH style={{ background: '#1A1500' }}>Vgs</TH>
+                      <TH style={{ background: '#080F1E', borderLeft: '3px solid #1D4ED8' }}>Phosphate P1 · Panneau</TH>
+                      <TH style={{ background: '#080F1E' }}>km</TH>
+                      <TH style={{ background: '#080F1E' }}>Vgs</TH>
+                      <TH style={{ background: '#1A0800', borderLeft: '3px solid #B45309' }}>Stérile P2 · Panneau</TH>
+                      <TH style={{ background: '#1A0800' }}>km</TH>
+                      <TH style={{ background: '#1A0800' }}>Vgs</TH>
+                      <TH style={{ background: '#06060F', borderLeft: '3px solid #1E40AF' }}>Phosphate P2 · Panneau</TH>
+                      <TH style={{ background: '#06060F' }}>km</TH>
+                      <TH style={{ background: '#06060F' }}>Vgs</TH>
+                      <TH>Commentaires</TH>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {rotations.map((r, i) => (
+                      <tr key={r.id} style={{ background: i % 2 === 0 ? '#F8FAFC' : 'white' }}>
+                        <TD style={{ fontWeight: 800, color: '#004B8D' }}>{r.camion_id}</TD>
+                        <TD>{r.chauffeur_1er || '—'}</TD>
+                        <TD style={{ borderRight: '2px solid #CBD5E1' }}>{r.chauffeur_2e || '—'}</TD>
+                        <TD style={{ background: '#FFFBEB', borderLeft: '3px solid #D97706', maxWidth: 160, overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                          {[r.sterile_p1a_panneau, r.sterile_p1b_panneau].filter(Boolean).join(' / ') || '—'}
+                        </TD>
+                        <TD style={{ background: '#FFFBEB', textAlign: 'center', fontFamily: 'monospace', fontSize: '10px' }}>
+                          {[r.sterile_p1a_km, r.sterile_p1b_km].filter(v => v != null).map(v => fmtDec(v)).join('/') || '—'}
+                        </TD>
+                        <TD style={{ background: '#FFFBEB', textAlign: 'center', fontWeight: 700, color: '#D97706' }}>
+                          {((r.sterile_p1a_vgs || 0) + (r.sterile_p1b_vgs || 0)) || '—'}
+                        </TD>
+                        <TD style={{ background: '#EFF6FF', borderLeft: '3px solid #1D4ED8', maxWidth: 160, overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                          {[r.phosphate_p1a_panneau, r.phosphate_p1b_panneau].filter(Boolean).join(' / ') || '—'}
+                        </TD>
+                        <TD style={{ background: '#EFF6FF', textAlign: 'center', fontFamily: 'monospace', fontSize: '10px' }}>
+                          {[r.phosphate_p1a_km, r.phosphate_p1b_km].filter(v => v != null).map(v => fmtDec(v)).join('/') || '—'}
+                        </TD>
+                        <TD style={{ background: '#EFF6FF', textAlign: 'center', fontWeight: 700, color: '#1D4ED8' }}>
+                          {((r.phosphate_p1a_vgs || 0) + (r.phosphate_p1b_vgs || 0)) || '—'}
+                        </TD>
+                        <TD style={{ background: '#FEF9EC', borderLeft: '3px solid #B45309', maxWidth: 160, overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                          {[r.sterile_p2a_panneau, r.sterile_p2b_panneau].filter(Boolean).join(' / ') || '—'}
+                        </TD>
+                        <TD style={{ background: '#FEF9EC', textAlign: 'center', fontFamily: 'monospace', fontSize: '10px' }}>
+                          {[r.sterile_p2a_km, r.sterile_p2b_km].filter(v => v != null).map(v => fmtDec(v)).join('/') || '—'}
+                        </TD>
+                        <TD style={{ background: '#FEF9EC', textAlign: 'center', fontWeight: 700, color: '#B45309' }}>
+                          {((r.sterile_p2a_vgs || 0) + (r.sterile_p2b_vgs || 0)) || '—'}
+                        </TD>
+                        <TD style={{ background: '#EEF2FF', borderLeft: '3px solid #1E40AF', maxWidth: 160, overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                          {[r.phosphate_p2a_panneau, r.phosphate_p2b_panneau].filter(Boolean).join(' / ') || '—'}
+                        </TD>
+                        <TD style={{ background: '#EEF2FF', textAlign: 'center', fontFamily: 'monospace', fontSize: '10px' }}>
+                          {[r.phosphate_p2a_km, r.phosphate_p2b_km].filter(v => v != null).map(v => fmtDec(v)).join('/') || '—'}
+                        </TD>
+                        <TD style={{ background: '#EEF2FF', textAlign: 'center', fontWeight: 700, color: '#1E40AF' }}>
+                          {((r.phosphate_p2a_vgs || 0) + (r.phosphate_p2b_vgs || 0)) || '—'}
+                        </TD>
+                        <TD style={{ color: '#6B7280', fontStyle: r.commentaires ? 'normal' : 'italic', maxWidth: 180 }}>
+                          {r.commentaires || '—'}
+                        </TD>
+                      </tr>
+                    ))}
+                  </tbody>
+                  <tfoot>
+                    <tr style={{ background: '#1a2332' }}>
+                      <td colSpan={3} style={{ padding: '8px 9px', color: 'white', fontWeight: 700, fontSize: '12px' }}>
+                        TOTAL — {rotations.length} camion(s)
+                      </td>
+                      <td colSpan={2} style={{ padding: '8px 9px', background: '#1A1500', borderLeft: '3px solid #D97706' }} />
+                      <td style={{ padding: '8px 9px', background: '#1A1500', textAlign: 'center', color: '#FDE68A', fontWeight: 900, fontSize: '13px' }}>
+                        {fmt(rotations.reduce((s, r) => s + (r.sterile_p1a_vgs || 0) + (r.sterile_p1b_vgs || 0), 0))}
+                      </td>
+                      <td colSpan={2} style={{ padding: '8px 9px', background: '#080F1E', borderLeft: '3px solid #1D4ED8' }} />
+                      <td style={{ padding: '8px 9px', background: '#080F1E', textAlign: 'center', color: '#93C5FD', fontWeight: 900, fontSize: '13px' }}>
+                        {fmt(rotations.reduce((s, r) => s + (r.phosphate_p1a_vgs || 0) + (r.phosphate_p1b_vgs || 0), 0))}
+                      </td>
+                      <td colSpan={2} style={{ padding: '8px 9px', background: '#1A0800', borderLeft: '3px solid #B45309' }} />
+                      <td style={{ padding: '8px 9px', background: '#1A0800', textAlign: 'center', color: '#FCA5A5', fontWeight: 900, fontSize: '13px' }}>
+                        {fmt(rotations.reduce((s, r) => s + (r.sterile_p2a_vgs || 0) + (r.sterile_p2b_vgs || 0), 0))}
+                      </td>
+                      <td colSpan={2} style={{ padding: '8px 9px', background: '#06060F', borderLeft: '3px solid #1E40AF' }} />
+                      <td style={{ padding: '8px 9px', background: '#06060F', textAlign: 'center', color: '#A5B4FC', fontWeight: 900, fontSize: '13px' }}>
+                        {fmt(rotations.reduce((s, r) => s + (r.phosphate_p2a_vgs || 0) + (r.phosphate_p2b_vgs || 0), 0))}
+                      </td>
+                      <td style={{ padding: '8px 9px' }} />
+                    </tr>
+                  </tfoot>
+                </table>
+              </div>
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ══════════════════════════════════════════════════
+// RAPPORT HEBDOMADAIRE
+// ══════════════════════════════════════════════════
+function RapportHebdomadaire() {
+  const getWeekRange = () => {
+    const now = new Date();
+    const day = now.getDay();
+    const mon = new Date(now);
+    mon.setDate(now.getDate() - (day === 0 ? 6 : day - 1));
+    const sun = new Date(mon);
+    sun.setDate(mon.getDate() + 6);
+    return { from: mon.toISOString().slice(0, 10), to: sun.toISOString().slice(0, 10) };
+  };
+
+  const [range, setRange] = useState(getWeekRange);
+  const [rotations, setRotations] = useState([]);
+  const [arrets, setArrets] = useState([]);
+  const [loading, setLoading] = useState(false);
+
+  const load = async () => {
+    setLoading(true);
+    try {
+      const dates = [];
+      const d = new Date(range.from);
+      const end = new Date(range.to);
+      while (d <= end) { dates.push(d.toISOString().slice(0, 10)); d.setDate(d.getDate() + 1); }
+      const results = await Promise.all(dates.map(dt => rotationAPI.getByDate(dt)));
+      const allRots = results.flatMap((r, i) => (r.data.rotations || []).map(rot => ({ ...rot, _date: dates[i] })));
+      setRotations(allRots);
+      const arr = await arretAPI.getAll({ from: range.from, to: range.to });
+      setArrets(arr.data.data || []);
+    } catch (e) { console.error(e); }
+    setLoading(false);
+  };
+
+  useEffect(() => { load(); }, [range.from, range.to]);
+
+  const byDate = {};
+  rotations.forEach(r => {
+    const d = r._date || r.date?.slice(0, 10);
+    if (d) { if (!byDate[d]) byDate[d] = []; byDate[d].push(r); }
+  });
+  const dates = Object.keys(byDate).sort();
+  const totalGlobal = calcFromRotations(rotations);
+  const allPanneaux = getPanneauRows(rotations);
+
+  const byDest = {};
+  allPanneaux.forEach(r => {
+    const k = `${r.type}||${r.tranchee}||${r.dest}`;
+    if (!byDest[k]) byDest[k] = { type: r.type, tranchee: r.tranchee, dest: r.dest, total: 0, volume: 0 };
+    byDest[k].total += r.total; byDest[k].volume += r.volume;
+  });
+  const destRows = Object.values(byDest).sort((a, b) => b.total - a.total);
+
+  const arretsByType = {};
+  arrets.forEach(a => {
+    if (!arretsByType[a.type_arret]) arretsByType[a.type_arret] = { nb: 0, heures: 0 };
+    arretsByType[a.type_arret].nb++;
+    arretsByType[a.type_arret].heures += parseFloat(a.duree_heures) || 0;
+  });
+
+  return (
+    <div className="space-y-4">
+      <div className="bg-white rounded-2xl p-4 border border-gray-100 flex flex-wrap items-center gap-4 justify-between" style={{ boxShadow: '0 1px 8px rgba(0,0,0,0.05)' }}>
+        <div>
+          <h2 className="text-base font-bold text-gray-800">Rapport Hebdomadaire de Production</h2>
+          <p className="text-xs text-gray-400">Site Minier BenGuerir — OCP Group</p>
+        </div>
+        <div className="flex items-center gap-2 flex-wrap">
+          <span className="text-xs font-semibold text-gray-500">Du</span>
+          <input type="date" value={range.from} onChange={e => setRange(r => ({ ...r, from: e.target.value }))}
+            className="border border-gray-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-400" />
+          <span className="text-xs font-semibold text-gray-500">Au</span>
+          <input type="date" value={range.to} onChange={e => setRange(r => ({ ...r, to: e.target.value }))}
+            className="border border-gray-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-400" />
+          <button onClick={() => window.print()} className="flex items-center gap-2 px-4 py-2 rounded-xl text-sm font-bold text-white" style={{ background: 'linear-gradient(135deg,#004B8D,#0066CC)' }}>
+            🖨 Imprimer
+          </button>
+        </div>
+      </div>
+
+      {loading ? (
+        <div className="flex justify-center items-center h-32"><div className="w-8 h-8 border-2 border-blue-600 border-t-transparent rounded-full animate-spin" /></div>
+      ) : (
+        <div className="space-y-4">
+          <div className="rounded-2xl overflow-hidden" style={{ background: 'linear-gradient(135deg,#0A1628,#004B8D,#00843D)', boxShadow: '0 4px 20px rgba(0,0,0,0.15)' }}>
+            <div className="px-6 py-5">
+              <h1 className="text-xl font-black text-white">Rapport Hebdomadaire de Production</h1>
+              <p className="text-white/70 text-sm mt-0.5">Site de Benguerir — {fmtDateShort(range.from)} → {fmtDateShort(range.to)}</p>
+              <div className="grid grid-cols-4 gap-3 mt-4">
+                {[
+                  { l: 'Jours de production', v: dates.length, c: '#6EE7B7' },
+                  { l: 'Total Voyages', v: fmt(totalGlobal.total_voyages), c: '#93C5FD' },
+                  { l: 'Volume Phosphate', v: `${fmt(totalGlobal.volume_phosphate)} m³`, c: '#60A5FA' },
+                  { l: 'Volume Stérile', v: `${fmt(totalGlobal.volume_sterile)} m³`, c: '#FDE68A' },
+                ].map((k, i) => (
+                  <div key={i} className="bg-white/10 rounded-xl p-3 border border-white/20 text-center">
+                    <div style={{ fontSize: '10px', fontWeight: 600, textTransform: 'uppercase', color: k.c + 'AA' }}>{k.l}</div>
+                    <div style={{ fontSize: '22px', fontWeight: 900, color: k.c, marginTop: '4px' }}>{k.v}</div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          </div>
+
+          {/* TABLEAU JOURNALIER */}
+          <div className="bg-white rounded-2xl overflow-hidden border border-gray-100" style={{ boxShadow: '0 1px 8px rgba(0,0,0,0.05)' }}>
+            <div className="px-5 py-3 border-b border-gray-100" style={{ background: '#F8FAFC' }}>
+              <span style={{ fontSize: '12px', fontWeight: 800, color: '#374151', textTransform: 'uppercase', letterSpacing: '0.5px' }}>📅 Récapitulatif Journalier</span>
+            </div>
+            <div style={{ overflowX: 'auto' }}>
+              <table style={{ width: '100%', borderCollapse: 'collapse' }}>
+                <thead>
+                  <tr style={{ background: '#0D2B4E' }}>
+                    <TH>Date</TH>
+                    <TH>Jour</TH>
+                    <TH style={{ textAlign: 'center', background: '#1D4ED8', borderLeft: '3px solid #3B82F6' }}>Vgs Phosphate</TH>
+                    <TH style={{ textAlign: 'center', background: '#1D4ED8' }}>Vol. Phosphate m³</TH>
+                    <TH style={{ textAlign: 'center', background: '#D97706', borderLeft: '3px solid #F59E0B' }}>Vgs Stérile</TH>
+                    <TH style={{ textAlign: 'center', background: '#D97706' }}>Vol. Stérile m³</TH>
+                    <TH style={{ textAlign: 'center' }}>Total Voyages</TH>
+                    <TH style={{ textAlign: 'center' }}>Total Volume m³</TH>
+                    <TH style={{ textAlign: 'center' }}>Nb Camions</TH>
+                    <TH style={{ textAlign: 'center' }}>Arrêts</TH>
+                  </tr>
+                </thead>
+                <tbody>
+                  {dates.map((d, i) => {
+                    const rots = byDate[d] || [];
+                    const c = calcFromRotations(rots);
+                    const dayArrets = arrets.filter(a => a.date?.slice(0, 10) === d);
+                    const arretTotal = dayArrets.some(a => a.arret_total);
+                    const dayObj = new Date(d + 'T12:00:00');
+                    const isWeekend = dayObj.getDay() === 0 || dayObj.getDay() === 6;
+                    const dayName = dayObj.toLocaleDateString('fr-FR', { weekday: 'long' });
+                    return (
+                      <tr key={d} style={{ background: arretTotal ? '#FEF2F2' : isWeekend ? '#F0FDF4' : i % 2 === 0 ? '#F8FAFC' : 'white' }}>
+                        <TD style={{ fontWeight: 700, color: '#004B8D' }}>{d}</TD>
+                        <TD style={{ textTransform: 'capitalize', color: isWeekend ? '#16A34A' : '#374151', fontWeight: isWeekend ? 600 : 400 }}>{dayName}</TD>
+                        <TD style={{ textAlign: 'center', fontWeight: 700, color: '#1D4ED8', background: '#EFF6FF', borderLeft: '3px solid #3B82F6' }}>{c.voyages_phosphate || '—'}</TD>
+                        <TD style={{ textAlign: 'center', color: '#1D4ED8', background: '#EFF6FF' }}>{c.volume_phosphate ? fmt(c.volume_phosphate) : '—'}</TD>
+                        <TD style={{ textAlign: 'center', fontWeight: 700, color: '#D97706', background: '#FFFBEB', borderLeft: '3px solid #F59E0B' }}>{c.voyages_sterile || '—'}</TD>
+                        <TD style={{ textAlign: 'center', color: '#D97706', background: '#FFFBEB' }}>{c.volume_sterile ? fmt(c.volume_sterile) : '—'}</TD>
+                        <TD style={{ textAlign: 'center', fontWeight: 800, fontSize: '13px' }}>{c.total_voyages || '—'}</TD>
+                        <TD style={{ textAlign: 'center', fontWeight: 700 }}>{c.total_volume ? fmt(c.total_volume) : '—'}</TD>
+                        <TD style={{ textAlign: 'center' }}>{rots.length}</TD>
+                        <TD style={{ textAlign: 'center' }}>
+                          {dayArrets.length > 0 ? (
+                            <span style={{ fontSize: '10px', fontWeight: 700, color: '#DC2626', background: '#FEF2F2', border: '1px solid #FECACA', padding: '2px 6px', borderRadius: '20px' }}>
+                              {dayArrets.length} ({fmtDec(dayArrets.reduce((s, a) => s + (parseFloat(a.duree_heures) || 0), 0))}h)
+                            </span>
+                          ) : <span style={{ color: '#D1D5DB', fontSize: '11px' }}>—</span>}
+                        </TD>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+                <tfoot>
+                  <tr style={{ background: '#1a2332' }}>
+                    <td colSpan={2} style={{ padding: '9px', color: 'white', fontWeight: 700 }}>TOTAL SEMAINE</td>
+                    <td style={{ padding: '9px', textAlign: 'center', color: '#93C5FD', fontWeight: 900, background: '#080F1E', borderLeft: '3px solid #3B82F6' }}>{fmt(totalGlobal.voyages_phosphate)}</td>
+                    <td style={{ padding: '9px', textAlign: 'center', color: '#93C5FD', background: '#080F1E' }}>{fmt(totalGlobal.volume_phosphate)}</td>
+                    <td style={{ padding: '9px', textAlign: 'center', color: '#FDE68A', fontWeight: 900, background: '#1A1500', borderLeft: '3px solid #F59E0B' }}>{fmt(totalGlobal.voyages_sterile)}</td>
+                    <td style={{ padding: '9px', textAlign: 'center', color: '#FDE68A', background: '#1A1500' }}>{fmt(totalGlobal.volume_sterile)}</td>
+                    <td style={{ padding: '9px', textAlign: 'center', color: '#6EE7B7', fontWeight: 900, fontSize: '15px' }}>{fmt(totalGlobal.total_voyages)}</td>
+                    <td style={{ padding: '9px', textAlign: 'center', color: '#6EE7B7', fontWeight: 900 }}>{fmt(totalGlobal.total_volume)}</td>
+                    <td colSpan={2} style={{ padding: '9px' }} />
+                  </tr>
+                </tfoot>
+              </table>
+            </div>
+          </div>
+
+          {/* PAR DESTINATION */}
+          {destRows.length > 0 && (
+            <div className="bg-white rounded-2xl overflow-hidden border border-gray-100" style={{ boxShadow: '0 1px 8px rgba(0,0,0,0.05)' }}>
+              <div className="px-5 py-3 border-b border-gray-100" style={{ background: '#F8FAFC' }}>
+                <span style={{ fontSize: '12px', fontWeight: 800, color: '#374151', textTransform: 'uppercase', letterSpacing: '0.5px' }}>📍 Production par Tranchée / Destination</span>
+              </div>
+              <div style={{ overflowX: 'auto' }}>
+                <table style={{ width: '100%', borderCollapse: 'collapse' }}>
+                  <thead>
+                    <tr style={{ background: '#374151' }}>
+                      {['Type', 'Tranchée / Source', 'Destination', 'Total Voyages', 'Volume m³', '% du total'].map(h => <TH key={h}>{h}</TH>)}
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {destRows.map((row, i) => (
+                      <tr key={i} style={{ background: i % 2 === 0 ? '#F9FAFB' : 'white' }}>
+                        <TD>
+                          <span style={{ fontSize: '10px', fontWeight: 700, padding: '2px 8px', borderRadius: '99px', background: row.type === 'PHOSPHATE' ? '#DBEAFE' : '#FEF3C7', color: row.type === 'PHOSPHATE' ? '#1D4ED8' : '#B45309' }}>{row.type}</span>
+                        </TD>
+                        <TD style={{ fontWeight: 600 }}>{row.tranchee}</TD>
+                        <TD>{row.dest}</TD>
+                        <TD style={{ textAlign: 'center', fontWeight: 800 }}>{fmt(row.total)}</TD>
+                        <TD style={{ textAlign: 'center', fontWeight: 700 }}>{fmt(row.volume)}</TD>
+                        <TD>
+                          <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                            <div style={{ flex: 1, background: '#E5E7EB', borderRadius: 99, height: 6 }}>
+                              <div style={{ height: 6, borderRadius: 99, width: `${Math.min(100, (row.total / (totalGlobal.total_voyages || 1)) * 100)}%`, background: row.type === 'PHOSPHATE' ? '#1D4ED8' : '#D97706' }} />
+                            </div>
+                            <span style={{ fontSize: '11px', fontWeight: 700, color: '#6B7280', minWidth: 36 }}>
+                              {((row.total / (totalGlobal.total_voyages || 1)) * 100).toFixed(1)}%
+                            </span>
+                          </div>
+                        </TD>
+                      </tr>
+                    ))}
                   </tbody>
                 </table>
               </div>
             </div>
           )}
 
-          {/* HEBDOMADAIRE */}
-          {reportType==='week' && (
-            <div className="space-y-4">
-              <div className="bg-white rounded-2xl border border-gray-100/80 overflow-hidden" style={{boxShadow:'0 1px 8px rgba(0,0,0,0.05)'}}>
-                <div className="px-5 py-4 border-b border-gray-100 flex items-center justify-between">
-                  <div>
-                    <h3 className="font-bold text-gray-800">Synthèse Hebdomadaire — {monthLabel}</h3>
-                    <p className="text-xs text-gray-400 mt-0.5">{weeks.length} semaine(s) dans ce cycle</p>
-                  </div>
-                  <button onClick={()=>exportRapportHebdoPDF({weeks:weeklyTableData,month:activeMonth,daily,monthLabel,cycleLabel})}
-                    className="flex items-center gap-2 px-4 py-2 rounded-xl text-sm font-semibold text-white hover:opacity-90"
-                    style={{background:'linear-gradient(135deg,#7C3AED,#6D28D9)'}}>
-                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className="w-4 h-4"><path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>
-                    Rapport Mensuel Hebdo PDF
-                  </button>
-                </div>
-                <div className="overflow-x-auto">
-                  <table className="w-full">
-                    <thead><tr style={{background:'#F8FAFC',borderBottom:'2px solid #F1F5F9'}}>
-                      {['Sem.','Période','Jours','Phosphate m³','Stérile m³','Total m³','Voyages','m³/vg','PDF'].map(c=>(
-                        <th key={c} className="text-left py-3 px-4 text-xs font-bold text-gray-500 uppercase tracking-wide whitespace-nowrap">{c}</th>
-                      ))}
-                    </tr></thead>
-                    <tbody>
-                      {weeklyTableData.map((w,i)=>(
-                        <tr key={i} className="border-t border-gray-50 hover:bg-purple-50/20 transition-colors">
-                          <td className="py-3 px-4"><span className="text-xs font-bold px-2 py-0.5 rounded-full bg-purple-100 text-purple-700">S{w.num}</span></td>
-                          <td className="py-3 px-4 text-sm font-medium text-gray-700 font-mono">{w.label}</td>
-                          <td className="py-3 px-4 text-sm text-gray-600">{w.jours}/7</td>
-                          <td className="py-3 px-4 text-sm font-bold text-blue-700 stat-num">{fmt(w.vol_phosphate)}</td>
-                          <td className="py-3 px-4 text-sm text-amber-700 stat-num">{fmt(w.vol_sterile)}</td>
-                          <td className="py-3 px-4 text-sm font-bold stat-num">{fmt(w.total_volume)}</td>
-                          <td className="py-3 px-4 text-sm stat-num">{fmt(w.total_voyages)}</td>
-                          <td className={`py-3 px-4 text-sm font-bold stat-num ${w.eff>=14?'text-green-600':w.eff>0?'text-red-500':'text-gray-400'}`}>{w.eff||'—'}</td>
-                          <td className="py-3 px-4">
-                            <button onClick={()=>exportRapportHebdoPDF({weeks:[w],month:activeMonth,daily:w.daily,monthLabel:`Semaine ${w.num} — ${monthLabel}`,cycleLabel:w.label})}
-                              className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold text-white hover:opacity-80"
-                              style={{background:'linear-gradient(135deg,#7C3AED,#6D28D9)'}}>
-                              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className="w-3.5 h-3.5"><path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>PDF
-                            </button>
-                          </td>
-                        </tr>
-                      ))}
-                      {weeklyTableData.length>0&&(()=>{
-                        const tot=weeklyTableData.reduce((a,w)=>({vp:a.vp+w.vol_phosphate,vs:a.vs+w.vol_sterile,vt:a.vt+w.total_volume,vy:a.vy+w.total_voyages}),{vp:0,vs:0,vt:0,vy:0});
-                        return (<tr style={{background:'#1A2332'}}>
-                          <td colSpan={3} className="py-3 px-4 text-sm font-bold text-white">TOTAL MENSUEL</td>
-                          <td className="py-3 px-4 text-sm font-bold text-blue-300 stat-num">{fmt(Math.round(tot.vp))}</td>
-                          <td className="py-3 px-4 text-sm font-bold text-amber-300 stat-num">{fmt(Math.round(tot.vs))}</td>
-                          <td className="py-3 px-4 text-sm font-bold text-white stat-num">{fmt(Math.round(tot.vt))}</td>
-                          <td className="py-3 px-4 text-sm font-bold text-white stat-num">{fmt(tot.vy)}</td>
-                          <td className="py-3 px-4 text-sm font-bold text-emerald-300 stat-num">{tot.vy>0?Math.round(tot.vt/tot.vy):'—'}</td>
-                          <td/>
-                        </tr>);
-                      })()}
-                    </tbody>
-                  </table>
-                </div>
+          {/* ARRÊTS */}
+          {arrets.length > 0 && (
+            <div className="bg-white rounded-2xl overflow-hidden border border-red-100" style={{ boxShadow: '0 1px 8px rgba(0,0,0,0.05)' }}>
+              <div className="px-5 py-3 border-b border-red-100" style={{ background: '#FFF5F5' }}>
+                <span style={{ fontSize: '12px', fontWeight: 800, color: '#B91C1C', textTransform: 'uppercase', letterSpacing: '0.5px' }}>⚠️ Arrêts de la Semaine</span>
+                <span style={{ marginLeft: 12, fontSize: '11px', fontWeight: 700, color: '#DC2626', background: '#FEE2E2', border: '1px solid #FECACA', padding: '2px 8px', borderRadius: '20px' }}>
+                  {arrets.length} incident(s) · {fmtDec(arrets.reduce((s, a) => s + (parseFloat(a.duree_heures) || 0), 0))}h
+                </span>
               </div>
-
-              {weeks.length>0&&(
-                <div className="bg-white rounded-2xl p-5 border border-gray-100/80" style={{boxShadow:'0 1px 8px rgba(0,0,0,0.05)'}}>
-                  <h3 className="font-bold text-gray-800 mb-4">Production par Semaine</h3>
-                  <ResponsiveContainer width="100%" height={260}>
-                    <ComposedChart data={weeklyTableData} margin={{left:-10,right:10,top:5}}>
-                      <CartesianGrid strokeDasharray="3 3" stroke="#F1F5F9" vertical={false}/>
-                      <XAxis dataKey="label" tick={{fontSize:9,fill:'#94A3B8'}} axisLine={false} tickLine={false}/>
-                      <YAxis tick={{fontSize:9,fill:'#94A3B8'}} axisLine={false} tickLine={false}/>
-                      <Tooltip content={<CustomTooltip/>}/>
-                      <Bar dataKey="vol_phosphate" name="Phosphate m³" fill="#004B8D" radius={[3,3,0,0]} maxBarSize={50}/>
-                      <Bar dataKey="vol_sterile" name="Stérile m³" fill="#F59E0B" radius={[3,3,0,0]} maxBarSize={50}/>
-                    </ComposedChart>
-                  </ResponsiveContainer>
-                </div>
-              )}
+              <div style={{ overflowX: 'auto' }}>
+                <table style={{ width: '100%', borderCollapse: 'collapse' }}>
+                  <thead>
+                    <tr style={{ background: '#B91C1C' }}>
+                      {['Date', 'Engin', "Type d'arrêt", 'Durée (h)', 'Description', 'Arrêt Total ?'].map(h => <TH key={h}>{h}</TH>)}
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {arrets.map((a, i) => (
+                      <tr key={a.id} style={{ background: a.arret_total ? '#FEF2F2' : i % 2 === 0 ? '#FFF8F8' : 'white' }}>
+                        <TD style={{ fontWeight: 700 }}>{a.date?.slice(0, 10)}</TD>
+                        <TD style={{ fontWeight: 600, color: '#374151' }}>{a.engin_code || <span style={{ color: '#9CA3AF', fontStyle: 'italic' }}>Global</span>}</TD>
+                        <TD>{a.type_arret}</TD>
+                        <TD style={{ textAlign: 'center', fontWeight: 700, color: '#DC2626' }}>{fmtDec(a.duree_heures)}h</TD>
+                        <TD style={{ color: '#6B7280', maxWidth: 240 }}>{a.description || '—'}</TD>
+                        <TD style={{ textAlign: 'center' }}>
+                          {a.arret_total ? <span style={{ fontSize: '10px', fontWeight: 700, color: '#DC2626', background: '#FEE2E2', padding: '2px 7px', borderRadius: '20px' }}>OUI</span>
+                            : <span style={{ color: '#D1D5DB' }}>—</span>}
+                        </TD>
+                      </tr>
+                    ))}
+                  </tbody>
+                  <tfoot>
+                    <tr style={{ background: '#1a2332' }}>
+                      <td colSpan={3} style={{ padding: '8px 9px', color: 'white', fontWeight: 700 }}>TOTAL</td>
+                      <td style={{ padding: '8px 9px', textAlign: 'center', color: '#FCA5A5', fontWeight: 900 }}>
+                        {fmtDec(arrets.reduce((s, a) => s + (parseFloat(a.duree_heures) || 0), 0))}h
+                      </td>
+                      <td colSpan={2} style={{ padding: '8px 9px' }} />
+                    </tr>
+                  </tfoot>
+                </table>
+              </div>
             </div>
           )}
 
-          {/* MENSUEL */}
-          {reportType==='month'&&(
-            <div className="space-y-4">
-              <div className="flex justify-end">
-                <button onClick={()=>{if(data)exportRapportMensuelPDF({data,month:activeMonth||`${viewYear}-${viewMonth}`});}}
-                  disabled={!data||loading}
-                  className="flex items-center gap-2 px-5 py-2.5 rounded-xl text-sm font-semibold text-white disabled:opacity-40 hover:opacity-90"
-                  style={{background:'linear-gradient(135deg,#004B8D,#0066CC)'}}>
-                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className="w-4 h-4"><path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/></svg>
-                  Exporter Rapport Mensuel PDF
-                </button>
-              </div>
-
-              {chartWithCumul.length>0?(
-                <div className="bg-white rounded-2xl p-5 border border-gray-100/80" style={{boxShadow:'0 1px 8px rgba(0,0,0,0.05)'}}>
-                  <div className="flex items-center justify-between mb-5">
-                    <div><h3 className="font-bold text-gray-800">Production Journalière — {monthLabel}</h3><p className="text-xs text-gray-400 mt-0.5">Volume m³ + courbe cumulative</p></div>
-                    <div className="flex gap-3 text-xs">
-                      <div className="flex items-center gap-1.5"><span className="w-3 h-3 rounded-sm" style={{background:'#004B8D'}}/><span className="text-gray-500">Phosphate</span></div>
-                      <div className="flex items-center gap-1.5"><span className="w-3 h-3 rounded-sm" style={{background:'#F59E0B'}}/><span className="text-gray-500">Stérile</span></div>
-                      <div className="flex items-center gap-1.5"><span className="w-3 h-0.5" style={{background:'#00843D'}}/><span className="text-gray-500">Cumul</span></div>
-                    </div>
-                  </div>
-                  <ResponsiveContainer width="100%" height={300}>
-                    <ComposedChart data={chartWithCumul} margin={{left:-10,right:10,top:5}}>
-                      <CartesianGrid strokeDasharray="3 3" stroke="#F1F5F9" vertical={false}/>
-                      <XAxis dataKey="label" tick={{fontSize:9,fill:'#94A3B8'}} axisLine={false} tickLine={false} interval={2}/>
-                      <YAxis yAxisId="vol" tick={{fontSize:9,fill:'#94A3B8'}} axisLine={false} tickLine={false}/>
-                      <YAxis yAxisId="cumul" orientation="right" tick={{fontSize:9,fill:'#94A3B8'}} axisLine={false} tickLine={false}/>
-                      <Tooltip content={<CustomTooltip/>}/>
-                      <Bar yAxisId="vol" dataKey="Phosphate m³" fill="#004B8D" radius={[3,3,0,0]} maxBarSize={20}/>
-                      <Bar yAxisId="vol" dataKey="Stérile m³" fill="#F59E0B" radius={[3,3,0,0]} maxBarSize={20}/>
-                      <Line yAxisId="cumul" type="monotone" dataKey="Cumul m³" stroke="#00843D" strokeWidth={2.5} dot={false} strokeDasharray="4 2"/>
-                      <ReferenceLine yAxisId="vol" y={3000} stroke="#EF4444" strokeDasharray="4 2" strokeOpacity={0.4}/>
-                    </ComposedChart>
-                  </ResponsiveContainer>
-                  <div className="text-xs text-red-400 mt-1 text-center">— seuil 3 000 m³/j phosphate</div>
-                </div>
-              ):(
-                <div className="bg-amber-50 border border-amber-200 rounded-2xl p-8 text-center text-amber-700">Aucune donnée pour <strong>{monthLabel}</strong>.</div>
-              )}
-
-              {chartData.length>0&&(
-                <div className="bg-white rounded-2xl p-5 border border-gray-100/80" style={{boxShadow:'0 1px 8px rgba(0,0,0,0.05)'}}>
-                  <h3 className="font-bold text-gray-800 mb-1">Efficacité m³/Voyage</h3>
-                  <p className="text-xs text-gray-400 mb-4">Objectif ≥ 14 m³/voyage</p>
-                  <ResponsiveContainer width="100%" height={180}>
-                    <AreaChart data={chartData} margin={{left:-10,right:10,top:5}}>
-                      <defs><linearGradient id="effGrad" x1="0" y1="0" x2="0" y2="1"><stop offset="5%" stopColor="#7C3AED" stopOpacity={0.2}/><stop offset="95%" stopColor="#7C3AED" stopOpacity={0}/></linearGradient></defs>
-                      <CartesianGrid strokeDasharray="3 3" stroke="#F1F5F9" vertical={false}/>
-                      <XAxis dataKey="label" tick={{fontSize:9,fill:'#94A3B8'}} axisLine={false} tickLine={false} interval={2}/>
-                      <YAxis tick={{fontSize:9,fill:'#94A3B8'}} axisLine={false} tickLine={false}/>
-                      <Tooltip formatter={v=>[v+' m³/vg','Efficacité']}/>
-                      <ReferenceLine y={14} stroke="#00843D" strokeDasharray="4 2" strokeOpacity={0.6}/>
-                      <Area type="monotone" dataKey="eff" name="m³/voyage" stroke="#7C3AED" fill="url(#effGrad)" strokeWidth={2.5} dot={false}/>
-                    </AreaChart>
-                  </ResponsiveContainer>
-                </div>
-              )}
-
-              {(data?.by_tranchee||[]).length>0&&(
-                <div className="bg-white rounded-2xl border border-gray-100/80 overflow-hidden" style={{boxShadow:'0 1px 8px rgba(0,0,0,0.05)'}}>
-                  <div className="px-5 py-4 border-b border-gray-100"><h3 className="font-bold text-gray-800">Performance par Tranchée — {activeMonth}</h3></div>
-                  <div className="overflow-x-auto">
-                    <table className="w-full">
-                      <thead><tr style={{background:'#F8FAFC'}}>
-                        {['Tranchée','Type','Volume m³','Voyages','m³/voyage'].map(c=><th key={c} className="text-left py-2.5 px-4 text-xs font-bold text-gray-500 uppercase">{c}</th>)}
-                      </tr></thead>
-                      <tbody>
-                        {data.by_tranchee.map((row,i)=>(
-                          <tr key={i} className="border-t border-gray-50 hover:bg-gray-50">
-                            <td className="py-2.5 px-4 text-sm font-bold text-gray-800">{row.tranchee||'—'}</td>
-                            <td className="py-2.5 px-4"><span className={`text-xs font-bold px-2 py-0.5 rounded-full ${row.type_materiau==='PHOSPHATE'?'bg-blue-100 text-blue-700':'bg-amber-100 text-amber-700'}`}>{row.type_materiau}</span></td>
-                            <td className="py-2.5 px-4 text-sm font-bold stat-num" style={{color:'#004B8D'}}>{fmt(row.total_volume)}</td>
-                            <td className="py-2.5 px-4 text-sm stat-num">{fmt(row.total_voyages)}</td>
-                            <td className="py-2.5 px-4 text-sm font-bold stat-num" style={{color:'#00843D'}}>{row.total_voyages>0?Math.round(row.total_volume/row.total_voyages):'—'}</td>
-                          </tr>
-                        ))}
-                      </tbody>
-                    </table>
-                  </div>
-                </div>
-              )}
-
-              {daily.length>0&&(
-                <div className="bg-white rounded-2xl border border-gray-100/80 overflow-hidden" style={{boxShadow:'0 1px 8px rgba(0,0,0,0.05)'}}>
-                  <div className="px-5 py-4 border-b border-gray-100"><h3 className="font-bold text-gray-800">Tableau Journalier Complet</h3></div>
-                  <div className="overflow-x-auto">
-                    <table className="w-full">
-                      <thead><tr style={{background:'#0D2B4E'}}>
-                        {['Date','Phosphate m³','Stérile m³','Total m³','Voyages','m³/vg'].map(c=>(
-                          <th key={c} className="text-left py-2.5 px-4 text-xs font-semibold text-gray-300 uppercase">{c}</th>
-                        ))}
-                      </tr></thead>
-                      <tbody>
-                        {daily.map((row,i)=>{
-                          const low=parseFloat(row.volume_phosphate)<3000&&parseFloat(row.volume_phosphate)>0;
-                          const eff=row.total_voyages>0?Math.round(row.total_volume/row.total_voyages):0;
-                          return (
-                            <tr key={i} className={`border-t border-gray-50 hover:bg-blue-50/20 ${low?'bg-red-50/40':i%2===0?'':'bg-gray-50/40'}`}>
-                              <td className="py-2.5 px-4 text-sm font-medium text-gray-700">{row.date}{low&&<span className="text-xs text-red-400 ml-1">⚠</span>}</td>
-                              <td className="py-2.5 px-4 text-sm font-bold stat-num" style={{color:'#004B8D'}}>{fmt(row.volume_phosphate)}</td>
-                              <td className="py-2.5 px-4 text-sm stat-num" style={{color:'#B45309'}}>{fmt(row.volume_sterile)}</td>
-                              <td className="py-2.5 px-4 text-sm font-bold stat-num">{fmt(row.total_volume)}</td>
-                              <td className="py-2.5 px-4 text-sm stat-num">{fmt(row.total_voyages)}</td>
-                              <td className={`py-2.5 px-4 text-sm font-bold stat-num ${eff>=14?'text-green-600':eff>0?'text-red-500':'text-gray-400'}`}>{eff||'—'}</td>
-                            </tr>
-                          );
-                        })}
-                      </tbody>
-                    </table>
-                  </div>
-                </div>
-              )}
+          {dates.length === 0 && (
+            <div className="bg-white rounded-2xl p-12 text-center border border-gray-100">
+              <div className="text-4xl mb-3">📅</div>
+              <div className="font-semibold text-gray-500">Aucune donnée pour cette période</div>
             </div>
           )}
-        </>
+        </div>
       )}
+    </div>
+  );
+}
+
+// ══════════════════════════════════════════════════
+// RAPPORT MENSUEL
+// ══════════════════════════════════════════════════
+function RapportMensuel() {
+  const today = new Date();
+  const [viewYear, setViewYear] = useState(String(today.getFullYear()));
+  const [viewMonth, setViewMonth] = useState(String(today.getMonth() + 1).padStart(2, '0'));
+  const [rotations, setRotations] = useState([]);
+  const [arrets, setArrets] = useState([]);
+  const [loading, setLoading] = useState(false);
+
+  const load = async (y, m) => {
+    setLoading(true);
+    const { from, to } = ocpMonthRange(y, m);
+    try {
+      const dates = [];
+      const d = new Date(from); const end = new Date(to);
+      while (d <= end) { dates.push(d.toISOString().slice(0, 10)); d.setDate(d.getDate() + 1); }
+      const results = await Promise.all(dates.map(dt => rotationAPI.getByDate(dt)));
+      const allRots = results.flatMap((r, i) => (r.data.rotations || []).map(rot => ({ ...rot, _date: dates[i] })));
+      setRotations(allRots);
+      const arr = await arretAPI.getAll({ from, to });
+      setArrets(arr.data.data || []);
+    } catch (e) { console.error(e); }
+    setLoading(false);
+  };
+
+  useEffect(() => { load(viewYear, viewMonth); }, [viewYear, viewMonth]);
+
+  const { from, to } = ocpMonthRange(viewYear, viewMonth);
+
+  const byDate = {};
+  rotations.forEach(r => {
+    const d = r._date || r.date?.slice(0, 10);
+    if (d) { if (!byDate[d]) byDate[d] = []; byDate[d].push(r); }
+  });
+  const dates = Object.keys(byDate).sort();
+  const totalGlobal = calcFromRotations(rotations);
+  const dateTrancheeMap = getDateTrancheeMap(rotations);
+
+  const allPanneaux = getPanneauRows(rotations);
+  const trancheeRows = [];
+  const seenKeys = new Set();
+  allPanneaux.forEach(r => {
+    const k = `${r.type}||${r.tranchee}||${r.dest}`;
+    if (!seenKeys.has(k)) {
+      seenKeys.add(k);
+      const total = Object.values(dateTrancheeMap[k] || {}).reduce((s, v) => s + v, 0);
+      trancheeRows.push({ type: r.type, tranchee: r.tranchee, dest: r.dest, key: k, total, volume: total * (r.type === 'PHOSPHATE' ? 16 : 14) });
+    }
+  });
+  trancheeRows.sort((a, b) => { if (a.type !== b.type) return a.type === 'PHOSPHATE' ? -1 : 1; return b.total - a.total; });
+
+  const phosphateTranchees = trancheeRows.filter(r => r.type === 'PHOSPHATE');
+  const sterileTranchees = trancheeRows.filter(r => r.type === 'STERILE');
+
+  // Semaines pour récap
+  const weeks = [];
+  let wCur = [];
+  dates.forEach((d, i) => {
+    wCur.push(d);
+    if (wCur.length === 7 || i === dates.length - 1) { weeks.push([...wCur]); wCur = []; }
+  });
+
+  const thSmall = { padding: '6px 7px', fontSize: '9px', fontWeight: 700, color: 'white', whiteSpace: 'nowrap', textAlign: 'center' };
+  const tdSmall = { padding: '5px 7px', fontSize: '10px', borderBottom: '1px solid #F1F5F9', textAlign: 'center', whiteSpace: 'nowrap' };
+
+  return (
+    <div className="space-y-4">
+      <div className="bg-white rounded-2xl p-4 border border-gray-100 flex flex-wrap items-center gap-4 justify-between" style={{ boxShadow: '0 1px 8px rgba(0,0,0,0.05)' }}>
+        <div>
+          <h2 className="text-base font-bold text-gray-800">Rapport Mensuel de Production</h2>
+          <p className="text-xs text-gray-400">Cycle OCP : du 27 mois précédent au 26 mois courant</p>
+        </div>
+        <div className="flex items-center gap-3">
+          <select value={viewMonth} onChange={e => setViewMonth(e.target.value)}
+            className="border border-gray-200 rounded-lg px-3 py-2 text-sm font-semibold focus:outline-none focus:ring-2 focus:ring-blue-400">
+            {MONTH_NAMES.map((n, i) => <option key={i} value={String(i + 1).padStart(2, '0')}>{n}</option>)}
+          </select>
+          <select value={viewYear} onChange={e => setViewYear(e.target.value)}
+            className="border border-gray-200 rounded-lg px-3 py-2 text-sm font-semibold focus:outline-none focus:ring-2 focus:ring-blue-400">
+            {[2025, 2026, 2027].map(y => <option key={y}>{y}</option>)}
+          </select>
+          <button onClick={() => window.print()} className="flex items-center gap-2 px-4 py-2 rounded-xl text-sm font-bold text-white" style={{ background: 'linear-gradient(135deg,#004B8D,#0066CC)' }}>
+            🖨 Imprimer
+          </button>
+        </div>
+      </div>
+
+      {loading ? (
+        <div className="flex justify-center items-center h-32"><div className="w-8 h-8 border-2 border-blue-600 border-t-transparent rounded-full animate-spin" /></div>
+      ) : (
+        <div className="space-y-4">
+          {/* HEADER */}
+          <div className="rounded-2xl overflow-hidden" style={{ background: 'linear-gradient(135deg,#0A1628,#004B8D,#00843D)', boxShadow: '0 4px 20px rgba(0,0,0,0.15)' }}>
+            <div className="px-6 py-5">
+              <div className="flex items-start justify-between">
+                <div>
+                  <h1 className="text-2xl font-black text-white">Rapport Mensuel de Production</h1>
+                  <p className="text-white/70 text-sm mt-1">Site de Benguerir — {MONTH_NAMES[parseInt(viewMonth) - 1]} {viewYear}</p>
+                  <p className="text-white/40 text-xs mt-0.5">Période OCP : {from} → {to}</p>
+                </div>
+                <div className="bg-white/15 border border-white/30 rounded-xl px-6 py-4 text-right">
+                  <div className="text-white/60 text-xs uppercase tracking-wider">Volume Total</div>
+                  <div className="text-4xl font-black text-white">{fmt(totalGlobal.total_volume)}</div>
+                  <div className="text-white/60 text-sm">m³</div>
+                </div>
+              </div>
+              <div className="grid grid-cols-5 gap-3 mt-5">
+                {[
+                  { l: 'Jours Production', v: dates.length, c: '#6EE7B7' },
+                  { l: 'Vgs Phosphate', v: fmt(totalGlobal.voyages_phosphate), c: '#93C5FD' },
+                  { l: 'Vol. Phosphate', v: `${fmt(totalGlobal.volume_phosphate)} m³`, c: '#60A5FA' },
+                  { l: 'Vgs Stérile', v: fmt(totalGlobal.voyages_sterile), c: '#FDE68A' },
+                  { l: 'Vol. Stérile', v: `${fmt(totalGlobal.volume_sterile)} m³`, c: '#FBBF24' },
+                ].map((k, i) => (
+                  <div key={i} className="bg-white/10 rounded-xl p-3 border border-white/20 text-center">
+                    <div style={{ fontSize: '10px', fontWeight: 600, textTransform: 'uppercase', color: k.c + 'AA' }}>{k.l}</div>
+                    <div style={{ fontSize: '18px', fontWeight: 900, color: k.c, marginTop: '4px' }}>{k.v}</div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          </div>
+
+          {/* TABLEAU CROISÉ PHOSPHATE */}
+          {phosphateTranchees.length > 0 && (
+            <div className="bg-white rounded-2xl overflow-hidden border border-blue-100" style={{ boxShadow: '0 1px 8px rgba(0,0,0,0.05)' }}>
+              <div className="flex items-center gap-3 px-5 py-3 border-b border-blue-100" style={{ background: '#F0F6FF' }}>
+                <span style={{ width: 10, height: 10, borderRadius: '50%', background: '#1D4ED8', display: 'inline-block' }} />
+                <span style={{ fontSize: '12px', fontWeight: 800, color: '#1D4ED8', textTransform: 'uppercase', letterSpacing: '1px' }}>
+                  Phosphate — Voyages Journaliers par Tranchée
+                </span>
+                <span className="ml-auto" style={{ fontSize: '11px', fontWeight: 700, color: '#1D4ED8', background: '#DBEAFE', border: '1px solid #BFDBFE', padding: '2px 10px', borderRadius: '20px' }}>
+                  Total : {fmt(totalGlobal.voyages_phosphate)} vgs · {fmt(totalGlobal.volume_phosphate)} m³
+                </span>
+              </div>
+              <div style={{ overflowX: 'auto' }}>
+                <table style={{ width: '100%', borderCollapse: 'collapse' }}>
+                  <thead>
+                    <tr style={{ background: '#1D4ED8' }}>
+                      <th style={{ ...thSmall, textAlign: 'left', minWidth: 110, position: 'sticky', left: 0, background: '#1D4ED8' }}>Tranchée</th>
+                      <th style={{ ...thSmall, textAlign: 'left', minWidth: 130 }}>Destination</th>
+                      {dates.map(d => <th key={d} style={{ ...thSmall, minWidth: 40 }}>{fmtDateShort(d)}</th>)}
+                      <th style={{ ...thSmall, minWidth: 65, background: '#1E3A8A' }}>TOTAL</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {phosphateTranchees.map((row, i) => (
+                      <tr key={i} style={{ background: i % 2 === 0 ? '#EFF6FF' : 'white' }}>
+                        <td style={{ ...tdSmall, textAlign: 'left', fontWeight: 700, color: '#1D4ED8', position: 'sticky', left: 0, background: i % 2 === 0 ? '#EFF6FF' : 'white' }}>{row.tranchee}</td>
+                        <td style={{ ...tdSmall, textAlign: 'left', fontSize: '10px', color: '#374151' }}>{row.dest}</td>
+                        {dates.map(d => {
+                          const v = dateTrancheeMap[row.key]?.[d];
+                          return <td key={d} style={{ ...tdSmall, fontWeight: v ? 700 : 400, color: v ? '#1D4ED8' : '#D1D5DB' }}>{v || '—'}</td>;
+                        })}
+                        <td style={{ ...tdSmall, fontWeight: 900, color: '#1D4ED8', fontSize: '12px', background: '#DBEAFE' }}>{fmt(row.total)}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                  <tfoot>
+                    <tr style={{ background: '#1E3A8A' }}>
+                      <td colSpan={2} style={{ padding: '7px 9px', color: 'white', fontWeight: 700, fontSize: '11px' }}>TOTAL PHOSPHATE</td>
+                      {dates.map(d => {
+                        const v = Object.entries(dateTrancheeMap).filter(([k]) => k.startsWith('PHOSPHATE')).reduce((s, [, dm]) => s + (dm[d] || 0), 0);
+                        return <td key={d} style={{ ...tdSmall, color: '#93C5FD', fontWeight: 800 }}>{v || '—'}</td>;
+                      })}
+                      <td style={{ ...tdSmall, color: '#60A5FA', fontWeight: 900, fontSize: '14px', background: '#1E3A8A' }}>{fmt(totalGlobal.voyages_phosphate)}</td>
+                    </tr>
+                  </tfoot>
+                </table>
+              </div>
+            </div>
+          )}
+
+          {/* TABLEAU CROISÉ STERILE */}
+          {sterileTranchees.length > 0 && (
+            <div className="bg-white rounded-2xl overflow-hidden border border-amber-100" style={{ boxShadow: '0 1px 8px rgba(0,0,0,0.05)' }}>
+              <div className="flex items-center gap-3 px-5 py-3 border-b border-amber-100" style={{ background: '#FFFBEB' }}>
+                <span style={{ width: 10, height: 10, borderRadius: '50%', background: '#D97706', display: 'inline-block' }} />
+                <span style={{ fontSize: '12px', fontWeight: 800, color: '#D97706', textTransform: 'uppercase', letterSpacing: '1px' }}>
+                  Stérile — Voyages Journaliers par Tranchée
+                </span>
+                <span className="ml-auto" style={{ fontSize: '11px', fontWeight: 700, color: '#B45309', background: '#FEF3C7', border: '1px solid #FDE68A', padding: '2px 10px', borderRadius: '20px' }}>
+                  Total : {fmt(totalGlobal.voyages_sterile)} vgs · {fmt(totalGlobal.volume_sterile)} m³
+                </span>
+              </div>
+              <div style={{ overflowX: 'auto' }}>
+                <table style={{ width: '100%', borderCollapse: 'collapse' }}>
+                  <thead>
+                    <tr style={{ background: '#D97706' }}>
+                      <th style={{ ...thSmall, textAlign: 'left', minWidth: 110, position: 'sticky', left: 0, background: '#D97706' }}>Tranchée</th>
+                      <th style={{ ...thSmall, textAlign: 'left', minWidth: 130 }}>Destination</th>
+                      {dates.map(d => <th key={d} style={{ ...thSmall, minWidth: 40 }}>{fmtDateShort(d)}</th>)}
+                      <th style={{ ...thSmall, minWidth: 65, background: '#92400E' }}>TOTAL</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {sterileTranchees.map((row, i) => (
+                      <tr key={i} style={{ background: i % 2 === 0 ? '#FFFBEB' : 'white' }}>
+                        <td style={{ ...tdSmall, textAlign: 'left', fontWeight: 700, color: '#D97706', position: 'sticky', left: 0, background: i % 2 === 0 ? '#FFFBEB' : 'white' }}>{row.tranchee}</td>
+                        <td style={{ ...tdSmall, textAlign: 'left', fontSize: '10px', color: '#374151' }}>{row.dest}</td>
+                        {dates.map(d => {
+                          const v = dateTrancheeMap[row.key]?.[d];
+                          return <td key={d} style={{ ...tdSmall, fontWeight: v ? 700 : 400, color: v ? '#D97706' : '#D1D5DB' }}>{v || '—'}</td>;
+                        })}
+                        <td style={{ ...tdSmall, fontWeight: 900, color: '#D97706', fontSize: '12px', background: '#FEF3C7' }}>{fmt(row.total)}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                  <tfoot>
+                    <tr style={{ background: '#92400E' }}>
+                      <td colSpan={2} style={{ padding: '7px 9px', color: 'white', fontWeight: 700, fontSize: '11px' }}>TOTAL STÉRILE</td>
+                      {dates.map(d => {
+                        const v = Object.entries(dateTrancheeMap).filter(([k]) => k.startsWith('STERILE')).reduce((s, [, dm]) => s + (dm[d] || 0), 0);
+                        return <td key={d} style={{ ...tdSmall, color: '#FDE68A', fontWeight: 800 }}>{v || '—'}</td>;
+                      })}
+                      <td style={{ ...tdSmall, color: '#FDE68A', fontWeight: 900, fontSize: '14px', background: '#92400E' }}>{fmt(totalGlobal.voyages_sterile)}</td>
+                    </tr>
+                  </tfoot>
+                </table>
+              </div>
+            </div>
+          )}
+
+          {/* RÉCAP PAR SEMAINE */}
+          {weeks.length > 0 && (
+            <div className="bg-white rounded-2xl overflow-hidden border border-gray-100" style={{ boxShadow: '0 1px 8px rgba(0,0,0,0.05)' }}>
+              <div className="px-5 py-3 border-b border-gray-100" style={{ background: '#F8FAFC' }}>
+                <span style={{ fontSize: '12px', fontWeight: 800, color: '#374151', textTransform: 'uppercase', letterSpacing: '0.5px' }}>📅 Récapitulatif Hebdomadaire</span>
+              </div>
+              <div style={{ overflowX: 'auto' }}>
+                <table style={{ width: '100%', borderCollapse: 'collapse' }}>
+                  <thead>
+                    <tr style={{ background: '#374151' }}>
+                      <TH>Semaine</TH>
+                      <TH>Période</TH>
+                      <TH style={{ textAlign: 'center', background: '#1D4ED8', borderLeft: '3px solid #3B82F6' }}>Vgs Phosphate</TH>
+                      <TH style={{ textAlign: 'center', background: '#1D4ED8' }}>Vol. Phosphate m³</TH>
+                      <TH style={{ textAlign: 'center', background: '#D97706', borderLeft: '3px solid #F59E0B' }}>Vgs Stérile</TH>
+                      <TH style={{ textAlign: 'center', background: '#D97706' }}>Vol. Stérile m³</TH>
+                      <TH style={{ textAlign: 'center' }}>Total Voyages</TH>
+                      <TH style={{ textAlign: 'center' }}>Total Volume m³</TH>
+                      <TH style={{ textAlign: 'center' }}>Nb Jours</TH>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {weeks.map((wDates, wi) => {
+                      const wRots = wDates.flatMap(d => byDate[d] || []);
+                      const wc = calcFromRotations(wRots);
+                      return (
+                        <tr key={wi} style={{ background: wi % 2 === 0 ? '#F9FAFB' : 'white' }}>
+                          <TD style={{ fontWeight: 700, color: '#004B8D' }}>Semaine {wi + 1}</TD>
+                          <TD style={{ fontSize: '10px', color: '#6B7280' }}>{fmtDateShort(wDates[0])} → {fmtDateShort(wDates[wDates.length - 1])}</TD>
+                          <TD style={{ textAlign: 'center', fontWeight: 700, color: '#1D4ED8', background: '#EFF6FF', borderLeft: '3px solid #3B82F6' }}>{fmt(wc.voyages_phosphate)}</TD>
+                          <TD style={{ textAlign: 'center', color: '#1D4ED8', background: '#EFF6FF' }}>{fmt(wc.volume_phosphate)}</TD>
+                          <TD style={{ textAlign: 'center', fontWeight: 700, color: '#D97706', background: '#FFFBEB', borderLeft: '3px solid #F59E0B' }}>{fmt(wc.voyages_sterile)}</TD>
+                          <TD style={{ textAlign: 'center', color: '#D97706', background: '#FFFBEB' }}>{fmt(wc.volume_sterile)}</TD>
+                          <TD style={{ textAlign: 'center', fontWeight: 800 }}>{fmt(wc.total_voyages)}</TD>
+                          <TD style={{ textAlign: 'center', fontWeight: 700 }}>{fmt(wc.total_volume)}</TD>
+                          <TD style={{ textAlign: 'center' }}>{wDates.filter(d => byDate[d]?.length > 0).length}</TD>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                  <tfoot>
+                    <tr style={{ background: '#1a2332' }}>
+                      <td colSpan={2} style={{ padding: '9px', color: 'white', fontWeight: 700 }}>TOTAL MOIS</td>
+                      <td style={{ padding: '9px', textAlign: 'center', color: '#93C5FD', fontWeight: 900, background: '#080F1E', borderLeft: '3px solid #3B82F6' }}>{fmt(totalGlobal.voyages_phosphate)}</td>
+                      <td style={{ padding: '9px', textAlign: 'center', color: '#93C5FD', background: '#080F1E' }}>{fmt(totalGlobal.volume_phosphate)}</td>
+                      <td style={{ padding: '9px', textAlign: 'center', color: '#FDE68A', fontWeight: 900, background: '#1A1500', borderLeft: '3px solid #F59E0B' }}>{fmt(totalGlobal.voyages_sterile)}</td>
+                      <td style={{ padding: '9px', textAlign: 'center', color: '#FDE68A', background: '#1A1500' }}>{fmt(totalGlobal.volume_sterile)}</td>
+                      <td style={{ padding: '9px', textAlign: 'center', color: '#6EE7B7', fontWeight: 900, fontSize: '15px' }}>{fmt(totalGlobal.total_voyages)}</td>
+                      <td style={{ padding: '9px', textAlign: 'center', color: '#6EE7B7', fontWeight: 900 }}>{fmt(totalGlobal.total_volume)}</td>
+                      <td style={{ padding: '9px', textAlign: 'center', color: 'white', fontWeight: 700 }}>{dates.length}</td>
+                    </tr>
+                  </tfoot>
+                </table>
+              </div>
+            </div>
+          )}
+
+          {rotations.length === 0 && (
+            <div className="bg-white rounded-2xl p-12 text-center border border-gray-100">
+              <div className="text-5xl mb-3">📊</div>
+              <div className="font-semibold text-gray-500 text-lg">Aucune donnée pour ce mois</div>
+              <div className="text-sm text-gray-400 mt-1">Période : {from} → {to}</div>
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ══════════════════════════════════════════════════
+// COMPOSANT PRINCIPAL
+// ══════════════════════════════════════════════════
+export default function Rapports() {
+  const [activeTab, setActiveTab] = useState('journalier');
+
+  const tabs = [
+    { id: 'journalier', icon: '📋', label: 'Rapport Journalier', desc: 'Production + rotations du jour' },
+    { id: 'hebdomadaire', icon: '📅', label: 'Rapport Hebdomadaire', desc: 'Récapitulatif de la semaine' },
+    { id: 'mensuel', icon: '📊', label: 'Rapport Mensuel', desc: 'Tableau croisé mensuel OCP' },
+  ];
+
+  return (
+    <div className="space-y-4 max-w-full">
+      <div className="flex gap-3">
+        {tabs.map(tab => (
+          <button key={tab.id} onClick={() => setActiveTab(tab.id)}
+            className="flex-1 p-4 rounded-2xl border-2 text-left transition-all"
+            style={{
+              borderColor: activeTab === tab.id ? '#004B8D' : '#E5E7EB',
+              background: activeTab === tab.id ? '#EFF6FF' : 'white',
+              boxShadow: activeTab === tab.id ? '0 0 0 3px rgba(0,75,141,0.1)' : '0 1px 4px rgba(0,0,0,0.04)',
+            }}>
+            <div style={{ fontSize: '24px', marginBottom: '6px' }}>{tab.icon}</div>
+            <div style={{ fontSize: '13px', fontWeight: 800, color: activeTab === tab.id ? '#004B8D' : '#1F2937' }}>{tab.label}</div>
+            <div style={{ fontSize: '11px', color: '#9CA3AF', marginTop: '2px' }}>{tab.desc}</div>
+          </button>
+        ))}
+      </div>
+      {activeTab === 'journalier' && <RapportJournalier />}
+      {activeTab === 'hebdomadaire' && <RapportHebdomadaire />}
+      {activeTab === 'mensuel' && <RapportMensuel />}
     </div>
   );
 }
