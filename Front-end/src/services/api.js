@@ -55,9 +55,10 @@ export const dashboardAPI = {
 };
 
 export const rotationAPI = {
-  getByDate:  (date)      => api.get('/rotations', { params: { date } }),
-  getDates:   ()          => api.get('/rotations/dates'),
-  getMonthly: (month)     => api.get('/rotations/monthly', { params: { month } }),
+  getByDate:         (date)      => api.get('/rotations', { params: { date } }),
+  getDates:          ()          => api.get('/rotations/dates'),
+  getMonthly:        (month)     => api.get('/rotations/monthly', { params: { month } }),
+  rapportJournalier: (date)      => api.get('/rotations/rapport-journalier', { params: { date } }),
   create:     withCacheInvalidation((data) => api.post('/rotations', data)),
   update:     withCacheInvalidation((id, data) => api.put(`/rotations/${id}`, data)),
   delete:     withCacheInvalidation((id) => api.delete(`/rotations/${id}`)),

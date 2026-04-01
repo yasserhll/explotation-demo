@@ -37,6 +37,7 @@ Route::get('/disponibilite', [ArretController::class, 'disponibilite']);
 Route::apiResource('arrets', ArretController::class);
 
 // Rotations Chauffeurs (journalier + mensuel)
+Route::get('/rotations/rapport-journalier', [RotationController::class, 'rapportJournalier']);
 Route::get('/rotations/dates',   [RotationController::class, 'dates']);
 Route::get('/rotations/monthly', [RotationController::class, 'monthly']);
 Route::apiResource('rotations', RotationController::class);

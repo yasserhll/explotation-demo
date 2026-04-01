@@ -22,6 +22,8 @@ class Rotation extends Model
         'phosphate_p2a_panneau', 'phosphate_p2a_km', 'phosphate_p2a_vgs',
         'phosphate_p2b_panneau', 'phosphate_p2b_km', 'phosphate_p2b_vgs',
         'commentaires',
+        'pelle_codes',
+        'lignes_json',
     ];
 
     protected $casts = [
